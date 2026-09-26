@@ -1196,6 +1196,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .use_ngg_culling = pdev->use_ngg_culling,
             .nggc_max_ps_params = nggc_max_ps_params,
             .no_ngg_gs = instance->drirc.performance.disable_ngg_gs,
+            .no_legacy_gs = pdev->use_ngg && !pdev->info.has_legacy_gs,
             .load_grid_size_from_user_sgpr = pdev->load_grid_size_from_user_sgpr,
             .emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat,
             .primitives_generated_query = primitives_generated_query,

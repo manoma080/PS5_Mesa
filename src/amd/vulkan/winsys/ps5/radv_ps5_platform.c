@@ -297,6 +297,12 @@ radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
    return sceAgcDriverSetTFRing((uintptr_t)va, size);
 }
 
+int
+radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
+{
+   return sceAgcDriverSetHsOffchipParam(granularity, buffering);
+}
+
 #else
 
 /* --------------------------------------------------------------- host model */
@@ -406,6 +412,14 @@ radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
 {
    (void)va;
    (void)size;
+   return 0;
+}
+
+int
+radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
+{
+   (void)granularity;
+   (void)buffering;
    return 0;
 }
 

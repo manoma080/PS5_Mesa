@@ -1912,6 +1912,18 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
                  (!stages[MESA_SHADER_VERTEX].nir && !stages[MESA_SHADER_TESS_EVAL].nir)) {
          stages[MESA_SHADER_GEOMETRY].info.is_ngg = false;
       }
+
+      /* Where a legacy GS cannot run (the PS5's GPU), a GS compiled with the
+       * stage before it stays NGG, with that stage: streamout from a GS is
+       * then not captured. (Separately compiled GS shader objects are still
+       * legacy: RADV only builds their arguments for that.) */
+      if (compiler_info->key.no_legacy_gs && stages[MESA_SHADER_GEOMETRY].nir) {
+         const mesa_shader_stage es = stages[MESA_SHADER_TESS_EVAL].nir ? MESA_SHADER_TESS_EVAL : MESA_SHADER_VERTEX;
+         if (stages[es].nir) {
+            stages[es].info.is_ngg = true;
+            stages[MESA_SHADER_GEOMETRY].info.is_ngg = true;
+         }
+      }
    }
 
    /* Now that we know if ngg is used for geometry shaders, determine the subgroup size. */

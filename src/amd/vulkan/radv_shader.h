@@ -538,6 +538,7 @@ struct radv_compiler_info {
       uint32_t use_ngg_culling : 1;
       uint32_t nggc_max_ps_params : 4;
       uint32_t no_ngg_gs : 1;
+      uint32_t no_legacy_gs : 1;
       uint32_t load_grid_size_from_user_sgpr : 1;
       uint32_t emulate_ngg_gs_query_pipeline_stat : 1;
       uint32_t primitives_generated_query : 1;
@@ -566,7 +567,7 @@ struct radv_compiler_info {
       uint32_t no_implicit_varying_subgroup_size : 1;
       uint32_t force_nan_preserve_min_max : 1;
       uint32_t nir_debug_info : 1;
-      uint32_t padding : 28;
+      uint32_t padding : 27;
 
       int32_t force_aniso;
 

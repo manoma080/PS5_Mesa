@@ -75,6 +75,9 @@ int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, 
 /* The tessellation factor ring the GPU uses from the next submission on (AGC
  * owns its registers); 0 or the system software's error. */
 int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);
+/* VGT_HS_OFFCHIP_PARAM's fields for the next submissions (AGC owns it too);
+ * 0 or the system software's error. */
+int radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering);
 
 uint64_t radv_ps5_now_ns(void);
 void radv_ps5_sleep_us(unsigned microseconds);

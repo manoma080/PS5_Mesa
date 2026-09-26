@@ -376,6 +376,9 @@ struct radeon_info {
    /* A GFX10.3 GPU whose surfaces use GFX10.1's (non-RB+) swizzle patterns:
     * addrlib is given a Navi10 chip revision for it. */
    bool gfx10_1_swizzles;
+   /* Whether a legacy (non-NGG) geometry shader can run: the GFX9-GFX10.3
+    * rings it needs are programmed through the kernel's registers. */
+   bool has_legacy_gs;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

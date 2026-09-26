@@ -57,9 +57,11 @@ struct radv_ps5_queue {
    uint64_t submitted_seq;
    uint64_t completed_seq;
 
-   /* The tessellation factor ring AGC holds (submit_lock). */
+   /* The tessellation factor ring AGC holds, and whether it holds RADV's
+    * off-chip parameter (submit_lock). */
    uint64_t tess_factor_ring_va;
    uint32_t tess_factor_ring_size;
+   bool hs_offchip_param_set;
 
    /* Waiters for a sync object to be submitted for signalling. */
    mtx_t sync_lock;

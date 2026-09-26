@@ -485,6 +485,16 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
       queue->tess_factor_ring_va = ctx->tess_factor_ring_va;
       queue->tess_factor_ring_size = ctx->tess_factor_ring_size;
    }
+   /* The off-chip ring RADV allocated holds as many workgroups as its
+    * OFFCHIP_BUFFERING names; AGC starts with its own. */
+   if (ctx->tess_factor_ring_va && !queue->hs_offchip_param_set) {
+      const uint32_t param = ctx->ws->info.hs_offchip_param;
+      const int set = radv_ps5_set_hs_offchip_param(G_03093C_OFFCHIP_GRANULARITY_GFX103(param),
+                                                    G_03093C_OFFCHIP_BUFFERING_GFX103(param));
+      if (set != 0)
+         fprintf(stderr, "radv/ps5: sceAgcDriverSetHsOffchipParam failed: 0x%08x\n", (unsigned)set);
+      queue->hs_offchip_param_set = true;
+   }
    if (submit->cs_count == 0) {
       /* Nothing for the GPU: the signals follow what was submitted before. */
       const uint64_t last = queue->submitted_seq;

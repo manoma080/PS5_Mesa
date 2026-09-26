@@ -236,6 +236,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * CI's navi10 list (dEQP-VK.image.host_image_copy.*.4_1_0.*, and
     * depth_stencil.s8_uint traps). */
    info->gfx10_1_swizzles = true;
+   /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
+    * RADV_DEBUG=nongg: 31 of 33 cases), and neither AGC library exports a
+    * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
+    * tessellation factor ring. */
+   info->has_legacy_gs = false;
    info->rbplus_allowed = false;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
