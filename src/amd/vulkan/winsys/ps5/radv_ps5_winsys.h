@@ -20,10 +20,11 @@
  * that number's low 32 bits to the marker once they have run, and the GPU has
  * run everything up to the number the marker names (PS5_Vulkan R69). */
 
-/* The ring the submissions' words are copied into. A submission is one AGC
- * submission of all its command streams (PS5_Vulkan runs one stream per
- * submission; a PM4 INDIRECT_BUFFER into title memory faulted the GPU, B8), so
- * the ring is large enough for most, and a larger one gets a buffer of its own. */
+/* The ring the submissions' words are copied into (a PM4 INDIRECT_BUFFER into
+ * title memory faulted the GPU, PS5_Vulkan B8). A submission's words go to the
+ * GPU as one AGC submission, or several in order when they are too many for
+ * one (radv_ps5_cs.c). The ring is large enough for most; a larger one gets a
+ * buffer of its own. */
 #define RADV_PS5_RING_BYTES (UINT64_C(16) << 20)
 #define RADV_PS5_RING_WORDS ((uint32_t)(RADV_PS5_RING_BYTES / 4))
 #define RADV_PS5_MAX_IN_FLIGHT 4096
