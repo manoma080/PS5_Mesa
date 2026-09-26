@@ -878,7 +878,7 @@ radv_dump_device_name(const struct radv_device *device, FILE *f)
 static void
 radv_dump_umr_ring(const struct radv_queue *queue, FILE *f)
 {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
    const struct radv_device *device = radv_queue_device(queue);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum amd_ip_type ring = radv_queue_ring(queue);

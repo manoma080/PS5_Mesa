@@ -350,7 +350,11 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
          fprintf(stderr, "radv: Failed to open log file: %s.\n", filename);
    }
 
+#ifdef RADV_PS5
+   instance->vk.physical_devices.enumerate = radv_ps5_enumerate_physical_devices;
+#else
    instance->vk.physical_devices.try_create_for_drm = create_drm_physical_device;
+#endif
    instance->vk.physical_devices.destroy = radv_physical_device_destroy;
 
    if (instance->debug_flags & RADV_DEBUG_STARTUP)

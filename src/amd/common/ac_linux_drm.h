@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
 #include "drm-uapi/amdgpu_drm.h"
 #include "amdgpu.h"
 #else
@@ -318,14 +318,14 @@ struct drm_amdgpu_userq_wait;
 struct amdgpu_va;
 typedef struct amdgpu_va *amdgpu_va_handle;
 
-#endif /* !defined(_WIN32) */
+#endif /* !defined(_WIN32) && !defined(AMD_NO_DRM) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* All functions are static inline stubs on Windows. */
-#ifdef _WIN32
+/* All functions are static inline stubs without DRM (Windows, the PS5). */
+#if defined(_WIN32) || defined(AMD_NO_DRM)
 #define __U_STUB__
 #endif
 #include "util/u_stub.h"
@@ -336,7 +336,7 @@ struct util_sync_provider;
 struct radeon_info;
 
 typedef union ac_drm_bo {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
    void *abo;
 #else
    amdgpu_bo_handle abo;

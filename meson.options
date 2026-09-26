@@ -752,6 +752,16 @@ option(
 )
 
 option(
+  'radv-winsys',
+  type : 'combo',
+  value : 'amdgpu',
+  choices : ['amdgpu', 'ps5'],
+  description : 'The kernel interface RADV allocates memory and submits ' +
+                'through: amdgpu (Linux DRM) or ps5 (the PlayStation 5 AGC ' +
+                'driver, reached through its exported functions).'
+)
+
+option(
   'radv-build-id',
   type : 'string',
   value : '',

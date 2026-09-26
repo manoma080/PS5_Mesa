@@ -217,7 +217,18 @@ libradv_files = files(
   'radv_wsi.h',
 )
 
-if not with_platform_windows
+if with_radv_ps5
+  libradv_files += files(
+    'winsys/ps5/radv_ps5_bo.c',
+    'winsys/ps5/radv_ps5_cs.c',
+    'winsys/ps5/radv_ps5_platform.c',
+    'winsys/ps5/radv_ps5_platform.h',
+    'winsys/ps5/radv_ps5_sync.c',
+    'winsys/ps5/radv_ps5_winsys.c',
+    'winsys/ps5/radv_ps5_winsys.h',
+    'winsys/ps5/radv_ps5_winsys_public.h',
+  )
+elif not with_platform_windows
   libradv_files += files(
     'winsys/amdgpu/radv_amdgpu_bo.c',
     'winsys/amdgpu/radv_amdgpu_bo.h',
@@ -275,34 +286,45 @@ if radv_u_trace
   radv_flags += '-DRADV_U_TRACE=1'
 endif
 
-libvulkan_radeon = shared_library(
-  'vulkan_radeon',
-  [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
-  vs_module_defs : vulkan_api_def,
-  include_directories : [
+_radv_target = {
+  'include_directories' : [
     inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
     inc_util, inc_virtio_gpu
   ],
-  link_with : [
+  'link_with' : [
     libamd_common, libamd_common_llvm, libamdgpu_addrlib,
   ],
-  dependencies : [
+  'dependencies' : [
     dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
     dep_valgrind, radv_deps, idep_aco,
     idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
     idep_vulkan_runtime, idep_amd_generated_headers, idep_xmlconfig,
     idep_radv_tracepoints,
   ],
-  c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
-  cpp_args : [radv_flags, cpp_msvc_compat_args],
-  link_args : [
-    ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
-  ],
-  link_depends : vulkan_icd_link_depends,
-  gnu_symbol_visibility : 'hidden',
-  name_prefix : host_machine.system() == 'windows' ? '' : [],
-  install : true,
-)
+  'c_args' : [no_override_init_args, radv_flags, c_msvc_compat_args],
+  'cpp_args' : [radv_flags, cpp_msvc_compat_args],
+  'gnu_symbol_visibility' : 'hidden',
+  'install' : true,
+}
+_radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer]
+
+# A PS5 title cannot load a shared library, so the console build is an archive
+# the title links; the host build of the PS5 winsys stays a loadable ICD.
+if with_radv_ps5 and get_option('default_library') == 'static'
+  libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target)
+else
+  libvulkan_radeon = shared_library(
+    'vulkan_radeon',
+    _radv_sources,
+    vs_module_defs : vulkan_api_def,
+    link_args : [
+      ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
+    ],
+    link_depends : vulkan_icd_link_depends,
+    name_prefix : host_machine.system() == 'windows' ? '' : [],
+    kwargs : _radv_target,
+  )
+endif
 
 if with_symbols_check
   test(

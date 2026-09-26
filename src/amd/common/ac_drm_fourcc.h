@@ -7,14 +7,16 @@
 #ifndef AC_DRM_FOURCC_H
 #define AC_DRM_FOURCC_H
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
 #include <stdint.h>
+#ifdef _WIN32
 typedef uint64_t __u64;
+#endif
 #define DRM_FORMAT_MOD_VENDOR_NONE    0
 #define DRM_FORMAT_MOD_VENDOR_AMD     0x02
 #define DRM_FORMAT_RESERVED	      ((1ULL << 56) - 1)
 #define fourcc_mod_code(vendor, val) \
-	((((__u64)DRM_FORMAT_MOD_VENDOR_## vendor) << 56) | ((val) & 0x00ffffffffffffffULL))
+	((((uint64_t)DRM_FORMAT_MOD_VENDOR_## vendor) << 56) | ((val) & 0x00ffffffffffffffULL))
 #define DRM_FORMAT_MOD_INVALID	fourcc_mod_code(NONE, DRM_FORMAT_RESERVED)
 #define DRM_FORMAT_MOD_LINEAR	fourcc_mod_code(NONE, 0)
 #define AMD_FMT_MOD fourcc_mod_code(AMD, 0)

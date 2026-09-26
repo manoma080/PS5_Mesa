@@ -31,7 +31,9 @@
 #include "vk_common_entrypoints.h"
 #include "vk_pipeline_cache.h"
 #include "vk_util.h"
-#ifndef _WIN32
+#if defined(RADV_PS5)
+#include "winsys/ps5/radv_ps5_winsys_public.h"
+#elif !defined(_WIN32)
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
 #include "util/mesa-blake3.h"
@@ -1299,7 +1301,11 @@ radv_device_init_compiler_info(struct radv_device *device)
 static VkResult
 radv_create_winsys(struct radv_device *device)
 {
-#ifdef _WIN32
+#if defined(RADV_PS5)
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   return radv_ps5_winsys_create(&pdev->info, instance->debug_flags, instance->perftest_flags, &device->ws);
+#elif defined(_WIN32)
    return VK_ERROR_INCOMPATIBLE_DRIVER;
 #else
    const struct radv_physical_device *pdev = radv_device_physical(device);

@@ -30,7 +30,8 @@
 #define ASICREV_IS_MI200(r)      ASICREV_IS(r, MI200)
 #define ASICREV_IS_GFX940(r)     ASICREV_IS(r, GFX940)
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
+#include <errno.h>
 static int drmGetCap(int fd, uint64_t capability, uint64_t *value)
 {
    return -EINVAL;
@@ -42,10 +43,14 @@ static int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
 {
    return -ENODEV;
 }
+#ifdef _WIN32
 static intptr_t readlink(const char *path, char *buf, size_t bufsiz)
 {
    return -1;
 }
+#else
+#include <unistd.h>
+#endif
 static char *
 drmGetFormatModifierName(uint64_t modifier)
 {

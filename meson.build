@@ -488,6 +488,18 @@ with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
 
+# RADV on the PlayStation 5: no DRM device, no libdrm, a winsys of its own
+# (src/amd/vulkan/winsys/ps5). AMD_NO_DRM marks the code the Windows port
+# already keeps away from DRM, which the PS5 build has to skip the same way.
+with_radv_ps5 = with_amd_vk and get_option('radv-winsys') == 'ps5'
+amd_no_drm = with_platform_windows or with_radv_ps5
+if amd_no_drm
+  pre_args += '-DAMD_NO_DRM'
+endif
+if with_radv_ps5
+  pre_args += '-DRADV_PS5'
+endif
+
 with_gfxstream_emulated_android = with_gfxstream_vk and with_platform_android and host_machine.system() == 'linux'
 if with_gfxstream_emulated_android
   # When building the android_stub with a non-Bionic sysroot/target, we to have
@@ -1897,7 +1909,7 @@ _drm_ver = '2.4.109'
 
 _libdrm_checks = [
   ['intel', with_gallium_i915],
-  ['amdgpu', (with_amd_vk and not with_platform_windows) or with_gallium_radeonsi],
+  ['amdgpu', (with_amd_vk and not amd_no_drm) or with_gallium_radeonsi],
 ]
 
 # Loop over the enables versions and get the highest libdrm requirement for all

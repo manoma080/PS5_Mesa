@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
 #define AMDGPU_TILING_ARRAY_MODE_SHIFT			0
 #define AMDGPU_TILING_ARRAY_MODE_MASK			0xf
 #define AMDGPU_TILING_PIPE_CONFIG_SHIFT			4

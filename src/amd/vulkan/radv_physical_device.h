@@ -28,7 +28,7 @@
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
 #include <xf86drm.h>
 #endif
 
@@ -151,7 +151,7 @@ struct radv_physical_device {
    /* Bitmask of memory types that are protected. */
    uint32_t memory_types_protected;
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
    int available_nodes;
    drmPciBusInfo bus_info;
 
@@ -271,6 +271,10 @@ bool radv_is_dcc_disabled(const struct radv_physical_device *pdev);
 bool radv_are_dcc_stores_disabled(const struct radv_physical_device *pdev);
 
 bool radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev);
+
+#ifdef RADV_PS5
+VkResult radv_ps5_enumerate_physical_devices(struct vk_instance *vk_instance);
+#endif
 
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);

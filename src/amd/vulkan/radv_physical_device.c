@@ -34,12 +34,15 @@
 #include "radv_video.h"
 #include "radv_wsi.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
 typedef void *drmDevicePtr;
 #else
 #include "drm-uapi/amdgpu_drm.h"
 #include "util/os_drm.h"
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
+#endif
+#ifdef RADV_PS5
+#include "winsys/ps5/radv_ps5_winsys_public.h"
 #endif
 #include "git_sha1.h"
 
@@ -47,7 +50,7 @@ typedef void *drmDevicePtr;
 #include <llvm-c/TargetMachine.h>
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(AMD_NO_DRM)
 #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 0
 #else
 #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 1
@@ -904,7 +907,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_nested_command_buffer = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_pci_bus_info = true,
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
       .EXT_physical_device_drm = true,
 #endif
       .EXT_pipeline_creation_cache_control = true,
@@ -2135,7 +2138,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
           */
          pdev->info.family != CHIP_NAVI21 && pdev->info.family != CHIP_NAVI22 && pdev->info.family != CHIP_VANGOGH,
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
       /* VK_EXT_pci_bus_info */
       .pciDomain = pdev->bus_info.domain,
       .pciBus = pdev->bus_info.bus,
@@ -2473,7 +2476,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    p->identicalMemoryTypeRequirements = false;
 
    /* VK_EXT_physical_device_drm */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
    if (pdev->available_nodes & (1 << DRM_NODE_PRIMARY)) {
       p->drmHasPrimary = true;
       p->drmPrimaryMajor = (int64_t)major(pdev->primary_devid);
@@ -2518,13 +2521,18 @@ static VkResult
 radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm_device,
                                 struct radv_physical_device **pdev_out)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(RADV_PS5)
    assert(drm_device == NULL);
    return VK_ERROR_INCOMPATIBLE_DRIVER;
 #else
    VkResult result;
    int fd = -1;
    int wsi_master_fd = -1, wsi_syncobj_fd = -1;
+#ifdef RADV_PS5
+   /* The console's one GPU, reached through AGC: there is no device node. */
+   assert(drm_device == NULL);
+   (void)drm_device;
+#else
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    enum radv_drm_device_type drm_device_type;
    drmVersionPtr version;
@@ -2568,6 +2576,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    if (instance->debug_flags & RADV_DEBUG_STARTUP)
       fprintf(stderr, "radv: info: Found device '%s'.\n", path);
+#endif
 
    struct radv_physical_device *pdev =
       vk_zalloc2(&instance->vk.alloc, NULL, sizeof(*pdev), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -2585,14 +2594,18 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail_alloc;
    }
 
+   struct radeon_winsys_info winsys_info;
+
+#ifdef RADV_PS5
+   result = radv_ps5_winsys_query_info(instance->debug_flags, &winsys_info);
+#else
    pdev->drm_device_type = drm_device_type;
 
    const bool is_virtio =
       pdev->drm_device_type == RADV_DRM_DEVICE_AMDGPU_VPIPE || pdev->drm_device_type == RADV_DRM_DEVICE_VIRTIO;
 
-   struct radeon_winsys_info winsys_info;
-
    result = radv_amdgpu_winsys_query_info(fd, instance->debug_flags, is_virtio, &winsys_info);
+#endif
    if (result != VK_SUCCESS) {
       result = vk_errorf(instance, result, "failed to query GPU info");
       goto fail_base;
@@ -2621,6 +2634,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->sync_types[num_sync_types++] = NULL;
    pdev->vk.supported_sync_types = pdev->sync_types;
 
+#ifndef RADV_PS5
    if (instance->vk.enabled_extensions.KHR_display) {
       wsi_master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
       if (wsi_master_fd >= 0) {
@@ -2639,6 +2653,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       if (fd != -1)
          wsi_syncobj_fd = os_dupfd_cloexec(fd);
    }
+#endif
 
    /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
    if (!radv_is_gpu_supported(&pdev->info)) {
@@ -2770,6 +2785,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    radv_physical_device_get_supported_extensions(pdev, &pdev->vk.supported_extensions);
    radv_physical_device_get_features(pdev, &pdev->vk.supported_features);
 
+#ifndef RADV_PS5
    struct stat primary_stat = {0}, render_stat = {0};
 
    pdev->available_nodes = drm_device->available_nodes;
@@ -2790,6 +2806,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail_perfcounters;
    }
    pdev->render_devid = render_stat.st_rdev;
+#endif
 
    if (radv_device_get_cache_uuid(pdev, pdev->cache_uuid)) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "cannot generate UUID");
@@ -2875,10 +2892,25 @@ fail_fd:
 #endif
 }
 
+#ifdef RADV_PS5
+VkResult
+radv_ps5_enumerate_physical_devices(struct vk_instance *vk_instance)
+{
+   struct radv_physical_device *pdev;
+   VkResult result = radv_physical_device_try_create((struct radv_instance *)vk_instance, NULL, &pdev);
+   if (result == VK_ERROR_INCOMPATIBLE_DRIVER || result == VK_ERROR_INITIALIZATION_FAILED)
+      return VK_SUCCESS;
+   if (result != VK_SUCCESS)
+      return result;
+   list_addtail(&pdev->vk.link, &vk_instance->physical_devices.list);
+   return VK_SUCCESS;
+}
+#endif
+
 VkResult
 create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device, struct vk_physical_device **out)
 {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
    bool supported_device = false;
 
    if (!(device->available_nodes & (1 << DRM_NODE_RENDER)))
@@ -2919,7 +2951,7 @@ radv_physical_device_destroy(struct vk_physical_device *vk_device)
    if (pdev->wsi_syncobj_fd != -1)
       close(pdev->wsi_syncobj_fd);
    simple_mtx_destroy(&pdev->drm_device_mtx);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(AMD_NO_DRM)
    if (pdev->drm_device)
       ac_drm_device_deinitialize(pdev->drm_device);
 #endif
@@ -3149,7 +3181,7 @@ radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, ui
    }
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(RADV_PS5)
 struct radeon_winsys_heap_info {
    uint64_t allocated_vram;
    uint64_t vram_usage;
@@ -3163,6 +3195,16 @@ static void
 radv_query_heap_info(struct radv_physical_device *pdev, struct radeon_winsys_heap_info *heap_info)
 {
    memset(heap_info, 0, sizeof(*heap_info));
+#ifdef RADV_PS5
+   /* One pool, which the CPU draws on too: the driver's own allocations and
+    * what the pool has handed out to anyone. */
+   uint64_t pool = 0, available = 0, driver = 0;
+   radv_ps5_winsys_heap_usage(&pool, &available, &driver);
+   heap_info->allocated_vram = driver;
+   heap_info->allocated_vram_vis = driver;
+   heap_info->vram_usage = pool - MIN2(available, pool);
+   heap_info->vram_vis_usage = heap_info->vram_usage;
+#endif
 }
 #else
 static void
