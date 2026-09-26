@@ -317,6 +317,11 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    simple_mtx_init(&instance->shader_dump_mtx, mtx_plain);
 
    instance->debug_flags = parse_debug_string(os_get_option("RADV_DEBUG"), radv_debug_options);
+#ifdef RADV_PS5
+   /* The console faults a PM4 INDIRECT_BUFFER into title memory, so nothing
+    * RADV records may run as one: the graphics preamble is emitted inline. */
+   instance->debug_flags |= RADV_DEBUG_NO_IB_CHAINING;
+#endif
    instance->perftest_flags = parse_debug_string(os_get_option("RADV_PERFTEST"), radv_perftest_options);
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);

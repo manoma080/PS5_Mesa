@@ -214,7 +214,7 @@ os_read_file(const char *filename, size_t *size)
 #include <sys/epoll.h>
 #endif
 
-#if DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD
+#if (DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD) && !defined(__PROSPERO__)
 
 #include "macros.h" /* ARRAY_SIZE */
 
@@ -257,7 +257,7 @@ os_same_file_description(int fd1, int fd2)
 
 #ifdef SYS_kcmp
    return syscall(SYS_kcmp, pid, pid, KCMP_FILE, fd1, fd2);
-#elif DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD
+#elif (DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD) && !defined(__PROSPERO__)
    int mib[] = { CTL_KERN, KERN_FILE };
    size_t len;
    if (sysctl(mib, ARRAY_SIZE(mib), NULL, &len, NULL, 0))

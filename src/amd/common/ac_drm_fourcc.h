@@ -9,7 +9,8 @@
 
 #if defined(_WIN32) || defined(AMD_NO_DRM)
 #include <stdint.h>
-#ifdef _WIN32
+/* Linux headers define __u64; elsewhere it is this. */
+#if defined(_WIN32) || !defined(__linux__)
 typedef uint64_t __u64;
 #endif
 #define DRM_FORMAT_MOD_VENDOR_NONE    0

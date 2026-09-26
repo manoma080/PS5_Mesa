@@ -339,6 +339,13 @@ if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedre
   endif
 endif
 
+# RADV on the PlayStation 5 reaches the GPU through AGC, beside a FreeBSD-derived
+# libc that has no DRM, so nothing may look for libdrm there. (A Linux host
+# build of the same winsys keeps DRM for the rest of Mesa.)
+if _vulkan_drivers.contains('amd') and get_option('radv-winsys') == 'ps5' and host_machine.system() != 'linux'
+  system_has_kms_drm = false
+endif
+
 # This has to be below the freedreno_kmds check since that can change system_has_kms_drm
 with_gallium_kmsro = with_gallium_drm or (system_has_kms_drm and with_gallium_zink)
 
