@@ -234,8 +234,10 @@ radv_host_image_copy_enabled(const struct radv_physical_device *pdev)
     * should be fixed soon, it's also still missing AVX for some formats. Let's not enable it by
     * default for now.
     */
-   return pdev->info.gfx_level >= GFX10_3 ||
-          (pdev->info.gfx_level == GFX10 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
+   /* GFX10.1's swizzles are GFX10's, whatever the GPU's level (the PS5's). */
+   const bool gfx10_swizzles = pdev->info.gfx_level == GFX10 || pdev->info.gfx10_1_swizzles;
+   return (pdev->info.gfx_level >= GFX10_3 && !gfx10_swizzles) ||
+          (gfx10_swizzles && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
 }
 
 static bool

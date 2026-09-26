@@ -373,6 +373,9 @@ struct radeon_info {
    bool has_userptr;
    /* Whether the colour block renders COLOR_5_9_9_9 (E5B9G9R9). */
    bool has_rgb9e5_color_target;
+   /* A GFX10.3 GPU whose surfaces use GFX10.1's (non-RB+) swizzle patterns:
+    * addrlib is given a Navi10 chip revision for it. */
+   bool gfx10_1_swizzles;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

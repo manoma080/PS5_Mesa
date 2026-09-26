@@ -224,6 +224,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
+   /* Upstream keeps host image copy off for GFX10's swizzles (known addrlib
+    * regressions): these cases fail the same way on this console as in Mesa
+    * CI's navi10 list (dEQP-VK.image.host_image_copy.*.4_1_0.*, and
+    * depth_stencil.s8_uint traps). */
+   info->gfx10_1_swizzles = true;
    info->rbplus_allowed = false;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
