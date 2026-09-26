@@ -16,6 +16,9 @@ struct radeon_winsys_info {
    struct radeon_info base;
    struct vk_sync_type syncobj_sync_type;
    uint32_t global_priority_mask;
+   /* Memory, semaphores and fences can be shared as file descriptors
+    * (opaque fd, sync fd, dma-buf). */
+   bool has_external_fd;
 };
 
 /* The console's GPU: a GFX10.3 shader core addressed the way the console's

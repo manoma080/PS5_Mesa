@@ -235,6 +235,9 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    info->has_sparse = false;
    info->has_sparse_image_3d = false;
    info->has_vm_always_valid = true;
+   /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
+    * made visible to the GPU is a probe still to run. */
+   info->has_userptr = false;
    info->max_submitted_ibs[AMD_IP_GFX] = 1;
 
    /* ac_query_gpu_info's own derivations, which have no kernel input. */
@@ -269,6 +272,8 @@ radv_ps5_winsys_query_info(uint64_t debug_flags, struct radeon_winsys_info *info
    info->syncobj_sync_type = radv_ps5_sync_type;
    /* One queue, one priority: what a title's submissions get. */
    info->global_priority_mask = BITFIELD_BIT(RADEON_CTX_PRIORITY_MEDIUM);
+   /* GPU memory and the queue's syncs have no file descriptor to share. */
+   info->has_external_fd = false;
    return VK_SUCCESS;
 }
 

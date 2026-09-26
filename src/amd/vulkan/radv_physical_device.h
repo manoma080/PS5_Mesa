@@ -131,6 +131,10 @@ struct radv_physical_device {
    /* Whether to use the LLVM compiler backend */
    bool use_llvm;
 
+   /* Whether memory, semaphores and fences can be shared as file descriptors
+    * (opaque fd, sync fd, dma-buf): the winsys's has_external_fd. */
+   bool has_external_fd;
+
    /* Whether to emulate ETC2 image support on HW without support. */
    bool emulate_etc2;
 

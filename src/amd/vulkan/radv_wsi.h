@@ -13,8 +13,10 @@
 
 #include "radv_physical_device.h"
 
+/* The PlayStation 5 has no window system: its surfaces are headless ones,
+ * which need VK_KHR_surface like any other. */
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || defined(VK_USE_PLATFORM_XCB_KHR) || defined(VK_USE_PLATFORM_XLIB_KHR) ||   \
-   defined(VK_USE_PLATFORM_DISPLAY_KHR)
+   defined(VK_USE_PLATFORM_DISPLAY_KHR) || defined(RADV_PS5)
 #define RADV_USE_WSI_PLATFORM
 #endif
 

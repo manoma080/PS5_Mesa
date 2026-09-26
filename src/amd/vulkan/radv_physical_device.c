@@ -728,11 +728,11 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_dynamic_rendering_local_read = true,
       .KHR_extended_flags = true,
       .KHR_external_fence = true,
-      .KHR_external_fence_fd = true,
+      .KHR_external_fence_fd = pdev->has_external_fd,
       .KHR_external_memory = true,
-      .KHR_external_memory_fd = true,
+      .KHR_external_memory_fd = pdev->has_external_fd,
       .KHR_external_semaphore = true,
-      .KHR_external_semaphore_fd = true,
+      .KHR_external_semaphore_fd = pdev->has_external_fd,
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
       .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
@@ -874,7 +874,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_acquire_unmodified = true,
-      .EXT_external_memory_dma_buf = true,
+      .EXT_external_memory_dma_buf = pdev->has_external_fd,
       .EXT_external_memory_host = pdev->info.has_userptr,
       .EXT_fragment_shader_interlock = radv_has_pops(pdev),
       .EXT_global_priority = true,
@@ -888,7 +888,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
 #ifdef RADV_USE_WSI_PLATFORM
       .EXT_image_compression_control_swapchain = radv_compression_control_enabled(pdev),
 #endif
-      .EXT_image_drm_format_modifier = pdev->info.gfx_level >= GFX9,
+      .EXT_image_drm_format_modifier = pdev->info.gfx_level >= GFX9 && pdev->has_external_fd,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = pdev->info.gfx_level >= GFX10,
       .EXT_image_view_min_lod = true,
@@ -2613,6 +2613,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    memcpy(&pdev->info, &winsys_info.base, sizeof(pdev->info));
    memcpy(&pdev->syncobj_sync_type, &winsys_info.syncobj_sync_type, sizeof(pdev->syncobj_sync_type));
+   pdev->has_external_fd = winsys_info.has_external_fd;
 
    for (uint32_t p = RADEON_CTX_PRIORITY_LOW; p <= RADEON_CTX_PRIORITY_REALTIME; p++) {
       if (winsys_info.global_priority_mask & BITFIELD_BIT(p))

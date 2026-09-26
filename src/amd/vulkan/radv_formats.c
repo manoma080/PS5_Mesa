@@ -1199,6 +1199,8 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
          break;
       FALLTHROUGH;
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+      if (!pdev->has_external_fd)
+         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT &&
           pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR)
@@ -1230,6 +1232,8 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
       compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
       break;
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      if (!pdev->info.has_userptr)
+         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
       break;
@@ -1567,17 +1571,22 @@ radv_GetPhysicalDeviceExternalBufferProperties(VkPhysicalDevice physicalDevice,
                                                const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
                                                VkExternalBufferProperties *pExternalBufferProperties)
 {
+   VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
    VkExternalMemoryFeatureFlagBits flags = 0;
    VkExternalMemoryHandleTypeFlags export_flags = 0;
    VkExternalMemoryHandleTypeFlags compat_flags = 0;
    switch (pExternalBufferInfo->handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
+      if (!pdev->has_external_fd)
+         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       compat_flags = export_flags =
          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT | VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       break;
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      if (!pdev->info.has_userptr)
+         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
       break;

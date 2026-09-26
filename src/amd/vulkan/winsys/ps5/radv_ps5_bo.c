@@ -21,6 +21,10 @@
 
 uint64_t radv_ps5_allocated_bytes;
 
+/* Memory reports (VK_EXT_device_memory_report) name a buffer by an id that is
+ * never 0 and never reused. */
+static uint64_t radv_ps5_next_obj_id;
+
 static VkResult
 radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignment, enum radeon_bo_domain domain,
                        enum radeon_bo_flag flags, unsigned priority, uint64_t replay_address,
@@ -52,6 +56,7 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
    bo->base.is_local = true;
    bo->base.use_global_list = true;
    bo->base.initial_domain = domain;
+   bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
 
    /* Direct memory arrives with whatever the pool held; RADV asks for zeroes
     * where it relies on them. The GPU reads through the CPU's writes only once
