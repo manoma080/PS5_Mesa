@@ -1899,9 +1899,12 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
 
       /* When pre-rasterization stages are compiled separately with shader objects, NGG GS needs to
        * be disabled because if the next stage of VS/TES is GS and GS is unknown, it might use
-       * streamout but it's not possible to know that when compiling VS or TES only.
+       * streamout but it's not possible to know that when compiling VS or TES only. (Not where
+       * a legacy GS cannot run: there they stay NGG, as on GFX11, below.)
        */
-      if (stages[MESA_SHADER_VERTEX].nir && stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY &&
+      if (compiler_info->key.no_legacy_gs) {
+         /* Nothing to disable. */
+      } else if (stages[MESA_SHADER_VERTEX].nir && stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY &&
           !stages[MESA_SHADER_GEOMETRY].nir) {
          stages[MESA_SHADER_VERTEX].info.is_ngg = false;
       } else if (stages[MESA_SHADER_TESS_EVAL].nir &&
@@ -1913,16 +1916,20 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
          stages[MESA_SHADER_GEOMETRY].info.is_ngg = false;
       }
 
-      /* Where a legacy GS cannot run (the PS5's GPU), a GS compiled with the
-       * stage before it stays NGG, with that stage: streamout from a GS is
-       * then not captured. (Separately compiled GS shader objects are still
-       * legacy: RADV only builds their arguments for that.) */
-      if (compiler_info->key.no_legacy_gs && stages[MESA_SHADER_GEOMETRY].nir) {
-         const mesa_shader_stage es = stages[MESA_SHADER_TESS_EVAL].nir ? MESA_SHADER_TESS_EVAL : MESA_SHADER_VERTEX;
-         if (stages[es].nir) {
-            stages[es].info.is_ngg = true;
+      /* Where a legacy GS cannot run (the PS5's GPU), every GS is NGG, and so
+       * is every VS or TES before one, whether compiled with it or separately
+       * (a shader object): streamout from a GS is then not captured. A GS
+       * compiled alone has no stage before it to follow. */
+      if (compiler_info->key.no_legacy_gs) {
+         if (stages[MESA_SHADER_GEOMETRY].nir)
             stages[MESA_SHADER_GEOMETRY].info.is_ngg = true;
-         }
+         if (stages[MESA_SHADER_VERTEX].nir &&
+             (stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY || stages[MESA_SHADER_GEOMETRY].nir) &&
+             !stages[MESA_SHADER_TESS_CTRL].nir && !stages[MESA_SHADER_TESS_EVAL].nir)
+            stages[MESA_SHADER_VERTEX].info.is_ngg = true;
+         if (stages[MESA_SHADER_TESS_EVAL].nir &&
+             (stages[MESA_SHADER_TESS_EVAL].info.next_stage == MESA_SHADER_GEOMETRY || stages[MESA_SHADER_GEOMETRY].nir))
+            stages[MESA_SHADER_TESS_EVAL].info.is_ngg = true;
       }
    }
 

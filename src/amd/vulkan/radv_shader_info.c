@@ -1357,7 +1357,10 @@ radv_determine_ngg_settings(const struct radv_compiler_info *compiler_info, stru
       num_vertices_per_prim = mesa_vertices_per_prim(ngg_stage->nir->info.gs.output_primitive);
    }
 
+   /* A merged shader compiled separately (an unlinked NGG GS where no legacy GS
+    * can run) declares no culling arguments. */
    ngg_stage->info.has_ngg_culling =
+      !ngg_stage->info.merged_shader_compiled_separately &&
       radv_consider_culling(compiler_info, ngg_stage->nir, ps_inputs_read, num_vertices_per_prim, &ngg_stage->info);
 
    if (ngg_stage->stage != MESA_SHADER_GEOMETRY) {
