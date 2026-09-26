@@ -376,8 +376,6 @@ struct radeon_info {
    /* A GFX10.3 GPU whose surfaces use GFX10.1's (non-RB+) swizzle patterns:
     * addrlib is given a Navi10 chip revision for it. */
    bool gfx10_1_swizzles;
-   /* NGG culling drops primitives it should keep (the PS5's GPU). */
-   bool has_ngg_culling_bug;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

@@ -221,6 +221,13 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    ac_fill_bug_info(info);
    ac_fill_tess_info(info);
    ac_fill_compiler_info(info, &dev, compiler_compat_mode);
+   /* The integer dot-product instructions do not compute what they should
+    * here: NGG's workgroup repack sums its counts with v_dot4_u32_u8, and
+    * with it a geometry shader whose vertex count is not constant, and a
+    * tessellated patch that NGG culling repacked, drew nothing. Without
+    * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
+    * RADV smoke title's geometry and tessellation checks). */
+   info->compiler_info.has_accelerated_dot_product = false;
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
@@ -229,10 +236,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * CI's navi10 list (dEQP-VK.image.host_image_copy.*.4_1_0.*, and
     * depth_stencil.s8_uint traps). */
    info->gfx10_1_swizzles = true;
-   /* A quad patch tessellated at level 3 or more drew nothing with NGG
-    * culling and every texel without it (RADV_DEBUG=nonggc), at every level
-    * from 2 to 9 (the RADV smoke title's tessellation checks). */
-   info->has_ngg_culling_bug = true;
    info->rbplus_allowed = false;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
