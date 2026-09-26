@@ -297,6 +297,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    if (!pAllocator)
       pAllocator = vk_default_allocator();
 
+#ifdef RADV_PS5
+   /* No loader stands in front of the driver on the console: the driver is the
+    * whole Vulkan implementation, and it has no layers
+    * (dEQP-VK.api.device_init.create_instance_layer_name_abuse). */
+   if (pCreateInfo->enabledLayerCount > 0)
+      return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
+#endif
+
    instance = vk_zalloc(pAllocator, sizeof(*instance), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!instance)
       return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);

@@ -276,8 +276,10 @@ radv_ps5_winsys_query_info(uint64_t debug_flags, struct radeon_winsys_info *info
       return VK_ERROR_INITIALIZATION_FAILED;
    radv_ps5_describe_gpu(&info->base, !(debug_flags & RADV_DEBUG_NO_CACHE_COMPAT));
    info->syncobj_sync_type = radv_ps5_sync_type;
-   /* One queue, one priority: what a title's submissions get. */
-   info->global_priority_mask = BITFIELD_BIT(RADEON_CTX_PRIORITY_MEDIUM);
+   /* One queue, which a title's submissions all reach: low and medium, the
+    * priorities an application may always have, both run there. A priority is
+    * a scheduling hint, and with one queue there is nothing to order. */
+   info->global_priority_mask = BITFIELD_BIT(RADEON_CTX_PRIORITY_LOW) | BITFIELD_BIT(RADEON_CTX_PRIORITY_MEDIUM);
    /* GPU memory and the queue's syncs have no file descriptor to share. */
    info->has_external_fd = false;
    return VK_SUCCESS;
@@ -325,6 +327,9 @@ radv_ps5_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsys_
 static VkResult
 radv_ps5_ctx_create(struct radeon_winsys *rws, enum radeon_ctx_priority priority, struct radeon_winsys_ctx **rctx)
 {
+   /* The priorities reported (global_priority_mask) are the ones a context is
+    * made with; a higher one is denied, as the extension allows
+    * (dEQP-VK.api.device_init.create_device_global_priority*). */
    if (priority != RADEON_CTX_PRIORITY_MEDIUM && priority != RADEON_CTX_PRIORITY_LOW)
       return VK_ERROR_NOT_PERMITTED;
    struct radv_ps5_ctx *const ctx = calloc(1, sizeof(*ctx));
