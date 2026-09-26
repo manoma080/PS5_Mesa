@@ -313,6 +313,11 @@ struct radeon_winsys {
    bool (*cs_split_due)(struct ac_cmdbuf *cs);
    void (*cs_split)(struct ac_cmdbuf *cs);
 
+   /* Only for a winsys whose system software owns the tessellation factor
+    * ring's registers (the PS5's); NULL otherwise. The ring a context's
+    * submissions use from now on, set before each submission that has one. */
+   void (*ctx_set_tess_factor_ring)(struct radeon_winsys_ctx *ctx, uint64_t va, uint32_t size);
+
    void (*dump_bo_ranges)(struct radeon_winsys *ws, FILE *file);
 
    void (*dump_bo_log)(struct radeon_winsys *ws, FILE *file);

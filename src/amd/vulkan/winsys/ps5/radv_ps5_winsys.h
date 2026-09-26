@@ -57,6 +57,10 @@ struct radv_ps5_queue {
    uint64_t submitted_seq;
    uint64_t completed_seq;
 
+   /* The tessellation factor ring AGC holds (submit_lock). */
+   uint64_t tess_factor_ring_va;
+   uint32_t tess_factor_ring_size;
+
    /* Waiters for a sync object to be submitted for signalling. */
    mtx_t sync_lock;
    cnd_t sync_cond;
@@ -137,6 +141,9 @@ struct radv_ps5_ctx {
    enum radeon_ctx_priority priority;
    /* Whether a submission on this context carried its initial preamble. */
    bool queue_used[AMD_NUM_IP_TYPES][MAX_RINGS_PER_TYPE];
+   /* The tessellation factor ring this context's submissions use, if any. */
+   uint64_t tess_factor_ring_va;
+   uint32_t tess_factor_ring_size;
 };
 
 /* Completion: the sequence the GPU has run up to, read from the marker. */

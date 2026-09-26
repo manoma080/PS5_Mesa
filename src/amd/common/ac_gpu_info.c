@@ -2062,6 +2062,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_userptr = %i\n", info->has_userptr);
    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
    fprintf(f, "    gfx10_1_swizzles = %i\n", info->gfx10_1_swizzles);
+   fprintf(f, "    has_ngg_culling_bug = %i\n", info->has_ngg_culling_bug);
    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);

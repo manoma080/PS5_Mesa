@@ -1644,6 +1644,14 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    if (result != VK_SUCCESS)
       return result;
 
+   if (queue->state.tess_rings_bo && device->ws->ctx_set_tess_factor_ring) {
+      const struct radv_physical_device *pdev = radv_device_physical(device);
+      device->ws->ctx_set_tess_factor_ring(ctx,
+                                           radv_buffer_get_va(queue->state.tess_rings_bo) +
+                                              pdev->info.tess_offchip_ring_size,
+                                           pdev->info.tess_factor_ring_size);
+   }
+
    if (use_ace) {
       result = radv_update_gang_preambles(queue, submission->is_protected);
       if (result != VK_SUCCESS)

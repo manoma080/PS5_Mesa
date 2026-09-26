@@ -229,6 +229,10 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * CI's navi10 list (dEQP-VK.image.host_image_copy.*.4_1_0.*, and
     * depth_stencil.s8_uint traps). */
    info->gfx10_1_swizzles = true;
+   /* A quad patch tessellated at level 3 or more drew nothing with NGG
+    * culling and every texel without it (RADV_DEBUG=nonggc), at every level
+    * from 2 to 9 (the RADV smoke title's tessellation checks). */
+   info->has_ngg_culling_bug = true;
    info->rbplus_allowed = false;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
@@ -347,6 +351,14 @@ radv_ps5_ctx_create(struct radeon_winsys *rws, enum radeon_ctx_priority priority
 }
 
 static void
+radv_ps5_ctx_set_tess_factor_ring(struct radeon_winsys_ctx *rctx, uint64_t va, uint32_t size)
+{
+   struct radv_ps5_ctx *const ctx = (struct radv_ps5_ctx *)rctx;
+   ctx->tess_factor_ring_va = va;
+   ctx->tess_factor_ring_size = size;
+}
+
+static void
 radv_ps5_ctx_destroy(struct radeon_winsys_ctx *rctx)
 {
    free(rctx);
@@ -422,6 +434,7 @@ radv_ps5_winsys_create(const struct radeon_info *info, uint64_t debug_flags, uin
    ws->base.query_gpuvm_fault = radv_ps5_winsys_query_gpuvm_fault;
    ws->base.ctx_create = radv_ps5_ctx_create;
    ws->base.ctx_destroy = radv_ps5_ctx_destroy;
+   ws->base.ctx_set_tess_factor_ring = radv_ps5_ctx_set_tess_factor_ring;
    ws->base.ctx_wait_idle = radv_ps5_ctx_wait_idle;
    ws->base.ctx_set_pstate = radv_ps5_ctx_set_pstate;
    ws->base.get_fd = radv_ps5_winsys_get_fd;

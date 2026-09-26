@@ -291,6 +291,12 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
    return sceAgcSuspendPoint();
 }
 
+int
+radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
+{
+   return sceAgcDriverSetTFRing((uintptr_t)va, size);
+}
+
 #else
 
 /* --------------------------------------------------------------- host model */
@@ -392,6 +398,14 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
    (void)count;
    /* Nothing runs the words on a PC; the submission completes at once. */
    *marker = marker_value;
+   return 0;
+}
+
+int
+radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
+{
+   (void)va;
+   (void)size;
    return 0;
 }
 

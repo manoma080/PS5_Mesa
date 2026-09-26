@@ -2745,7 +2745,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->use_ngg_culling = pdev->use_ngg && pdev->info.max_render_backends > 1 &&
                            (pdev->info.gfx_level == GFX10_3 || pdev->info.gfx_level == GFX10 ||
                             (instance->perftest_flags & RADV_PERFTEST_NGGC)) &&
-                           !(instance->debug_flags & RADV_DEBUG_NO_NGGC);
+                           !(instance->debug_flags & RADV_DEBUG_NO_NGGC) && !pdev->info.has_ngg_culling_bug;
 
    pdev->emulate_ngg_gs_query_pipeline_stat = pdev->use_ngg && pdev->info.gfx_level < GFX11;
 

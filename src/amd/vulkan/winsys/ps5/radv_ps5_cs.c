@@ -473,6 +473,18 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
       return result;
 
    simple_mtx_lock(&queue->submit_lock);
+   /* AGC owns the tessellation factor ring's registers: the ring is handed to
+    * it, after the GPU has finished with the one it held. */
+   if (ctx->tess_factor_ring_va && (ctx->tess_factor_ring_va != queue->tess_factor_ring_va ||
+                                    ctx->tess_factor_ring_size != queue->tess_factor_ring_size)) {
+      radv_ps5_queue_wait_seq(queue, queue->submitted_seq, OS_TIMEOUT_INFINITE);
+      const int set = radv_ps5_set_tess_factor_ring(ctx->tess_factor_ring_va, ctx->tess_factor_ring_size);
+      if (set != 0)
+         fprintf(stderr, "radv/ps5: sceAgcDriverSetTFRing(0x%llx, %u) failed: 0x%08x\n",
+                 (unsigned long long)ctx->tess_factor_ring_va, ctx->tess_factor_ring_size, (unsigned)set);
+      queue->tess_factor_ring_va = ctx->tess_factor_ring_va;
+      queue->tess_factor_ring_size = ctx->tess_factor_ring_size;
+   }
    if (submit->cs_count == 0) {
       /* Nothing for the GPU: the signals follow what was submitted before. */
       const uint64_t last = queue->submitted_seq;
