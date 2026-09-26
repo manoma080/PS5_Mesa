@@ -237,6 +237,8 @@ bool
 radv_is_colorbuffer_format_supported(const struct radv_physical_device *pdev, VkFormat format)
 {
    const struct util_format_description *desc = radv_format_description(format);
+   if (format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && !pdev->info.has_rgb9e5_color_target)
+      return false;
    return ac_is_colorbuffer_format_supported(pdev->info.gfx_level, desc->format);
 }
 

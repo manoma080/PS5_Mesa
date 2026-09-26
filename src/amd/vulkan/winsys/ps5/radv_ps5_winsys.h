@@ -102,6 +102,9 @@ struct radv_ps5_cs_chunk {
    uint32_t *words;
    uint32_t cdw;
    uint32_t max_dw;
+   /* The chunk starts at a split (cs_split): an AGC submission may begin with
+    * it, after the preamble. */
+   bool starts_submission;
 };
 
 struct radv_ps5_cs {
@@ -113,6 +116,10 @@ struct radv_ps5_cs {
    /* Finished chunks, oldest first; the current one is base.buf. */
    struct util_dynarray chunks;
    uint32_t words_in_chunks;
+   /* The current chunk starts at a split, and where in the stream the last
+    * split (or the start) is. */
+   bool buf_starts_submission;
+   uint32_t split_at;
 };
 
 static inline struct radv_ps5_cs *

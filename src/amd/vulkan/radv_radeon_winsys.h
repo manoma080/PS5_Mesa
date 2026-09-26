@@ -305,6 +305,14 @@ struct radeon_winsys {
 
    void (*cs_pad)(struct ac_cmdbuf *cs, unsigned leave_dw_space);
 
+   /* Only for a winsys whose submissions each start from reset GPU state and
+    * hold a limited number of words (the PlayStation 5's); NULL otherwise.
+    * cs_split_due says the stream should start a new submission before its
+    * next draw or dispatch, and cs_split marks that point: the command buffer
+    * re-emits all of its state after it. */
+   bool (*cs_split_due)(struct ac_cmdbuf *cs);
+   void (*cs_split)(struct ac_cmdbuf *cs);
+
    void (*dump_bo_ranges)(struct radeon_winsys *ws, FILE *file);
 
    void (*dump_bo_log)(struct radeon_winsys *ws, FILE *file);

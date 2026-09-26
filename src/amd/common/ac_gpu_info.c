@@ -1062,6 +1062,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->r600_has_virtual_memory = true;
 
    info->has_userptr = !info->is_virtio;
+   info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
    info->has_syncobj = true;
    info->has_fence_to_handle = true;
 
@@ -2059,6 +2060,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "Kernel & winsys capabilities:\n");
    fprintf(f, "    drm = %i.%i.%i\n", info->drm_major, info->drm_minor, info->drm_patchlevel);
    fprintf(f, "    has_userptr = %i\n", info->has_userptr);
+   fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);

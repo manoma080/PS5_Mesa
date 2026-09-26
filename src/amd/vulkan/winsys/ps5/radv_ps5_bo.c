@@ -58,10 +58,12 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
    bo->base.initial_domain = domain;
    bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
 
-   /* Direct memory arrives with whatever the pool held; RADV asks for zeroes
-    * where it relies on them. The GPU reads through the CPU's writes only once
-    * they are in memory. */
-   if (flags & RADEON_FLAG_ZERO_VRAM) {
+   /* Direct memory arrives with whatever the pool held. amdgpu gives GTT
+    * buffers zeroed pages and VRAM ones zeroes when asked, and RADV relies on
+    * both: an event's buffer is never written before its first status read
+    * (dEQP-VK.api.command_buffers.submit_count_equal_zero read a stale 1).
+    * The GPU reads through the CPU's writes only once they are in memory. */
+   if ((flags & RADEON_FLAG_ZERO_VRAM) || (domain & RADEON_DOMAIN_GTT)) {
       memset(bo->memory.cpu, 0, size);
       radv_ps5_cpu_flush(bo->memory.cpu, size);
    }

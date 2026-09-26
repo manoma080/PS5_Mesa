@@ -237,6 +237,9 @@ struct radv_rendering_state {
    bool gfx12_has_hiz;
    struct radv_attachment vrs_att;
    VkExtent2D vrs_texel_size;
+   /* What radv_emit_rendering_area writes besides the area. */
+   VkExtent2D screen_scissor;
+   bool dcc_disable_constant_encode_ac01;
 };
 
 struct radv_push_descriptor_set {

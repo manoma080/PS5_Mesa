@@ -238,6 +238,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
     * made visible to the GPU is a probe still to run. */
    info->has_userptr = false;
+   /* The shaders are GFX10.3's but the colour block renders E5B9G9R9 wrong:
+    * every blit into it with a non-zero colour read back incorrect
+    * (dEQP-VK.api.copy_and_blit.*.blit_image.all_formats.color.*.
+    * e5b9g9r9_ufloat_pack32, 500 cases), while the zero colours of an
+    * a8_unorm source passed. */
+   info->has_rgb9e5_color_target = false;
    info->max_submitted_ibs[AMD_IP_GFX] = 1;
 
    /* ac_query_gpu_info's own derivations, which have no kernel input. */

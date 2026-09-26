@@ -371,6 +371,8 @@ struct radeon_info {
    bool is_amdgpu;
    bool is_virtio;
    bool has_userptr;
+   /* Whether the colour block renders COLOR_5_9_9_9 (E5B9G9R9). */
+   bool has_rgb9e5_color_target;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

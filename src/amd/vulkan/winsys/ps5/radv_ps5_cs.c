@@ -18,11 +18,28 @@
 /* Command streams. The console faults a PM4 INDIRECT_BUFFER into title memory
  * (PS5_Vulkan B8), so nothing is chained: a stream's words stay in CPU memory,
  * in chunks that never move, and a submission copies every stream it carries
- * into the queue's ring as one AGC submission, which ends with the packet that
- * writes the submission's sequence number to the marker. */
+ * into the queue's ring as AGC submissions, the last of which ends with the
+ * packet that writes the submission's sequence number to the marker.
+ *
+ * Every chunk boundary is a packet boundary, which is where a submission too
+ * large for one AGC submission is split. */
 
 #define RADV_PS5_CS_INITIAL_DW (20 * 1024)
-#define RADV_PS5_CS_MAX_CHUNK_DW (4u << 20)
+#define RADV_PS5_CS_MAX_CHUNK_DW (256u * 1024)
+
+/* The most words one AGC submission carries: the INDIRECT_BUFFER that runs it
+ * has a 20-bit size in words, and a larger one never completed on the console
+ * (dEQP-VK.api.command_buffers.record_many_draws_primary_2, about 131,000
+ * draws in one command buffer). */
+#define RADV_PS5_SUBMIT_MAX_DW ((1u << 20) - 64)
+
+/* Each AGC submission starts from reset GPU state: the same 131,000 draws split
+ * into two submissions drew only the first part. So a submission is split
+ * only where the GPU state is the preamble's -- where a stream starts, and at
+ * a split RADV asked for (cs_split), after which it re-emits its state -- and
+ * every part after the first starts with the preamble again. A stream asks for
+ * a split once it holds this many words past the last one. */
+#define RADV_PS5_SPLIT_DUE_DW (512u * 1024)
 
 static bool
 radv_ps5_cs_alloc(struct radv_ps5_cs *cs, uint32_t max_dw)
@@ -95,6 +112,7 @@ radv_ps5_cs_grow(struct ac_cmdbuf *base, size_t min_size)
       .words = cs->base.buf,
       .cdw = cs->base.cdw,
       .max_dw = cs->base.max_dw,
+      .starts_submission = cs->buf_starts_submission,
    };
    const uint64_t wanted = MAX2((uint64_t)min_size + 16, (uint64_t)cs->base.max_dw * 2);
    const uint32_t max_dw = (uint32_t)MAX2(MIN2(wanted, RADV_PS5_CS_MAX_CHUNK_DW), (uint64_t)min_size + 16);
@@ -111,6 +129,7 @@ radv_ps5_cs_grow(struct ac_cmdbuf *base, size_t min_size)
       return;
    }
    cs->words_in_chunks += done.cdw;
+   cs->buf_starts_submission = false;
 }
 
 static void
@@ -152,6 +171,8 @@ radv_ps5_cs_reset(struct ac_cmdbuf *base)
    radv_ps5_cs_free_chunks(cs);
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
+   cs->buf_starts_submission = false;
+   cs->split_at = 0;
    cs->status = VK_SUCCESS;
 }
 
@@ -201,6 +222,27 @@ radv_ps5_cs_append(struct radv_ps5_cs *cs, const uint32_t *words, uint32_t count
    }
 }
 
+static bool
+radv_ps5_cs_split_due(struct ac_cmdbuf *base)
+{
+   struct radv_ps5_cs *const cs = radv_ps5_cs(base);
+   return cs->status == VK_SUCCESS && radv_ps5_cs_words(cs) - cs->split_at > RADV_PS5_SPLIT_DUE_DW;
+}
+
+/* The words from here on may start an AGC submission: the current chunk ends
+ * and the next starts at the split. */
+static void
+radv_ps5_cs_split(struct ac_cmdbuf *base)
+{
+   struct radv_ps5_cs *const cs = radv_ps5_cs(base);
+   if (cs->base.cdw)
+      radv_ps5_cs_grow(&cs->base, 0);
+   if (cs->status != VK_SUCCESS)
+      return;
+   cs->buf_starts_submission = true;
+   cs->split_at = radv_ps5_cs_words(cs);
+}
+
 static void
 radv_ps5_cs_execute_secondary(struct ac_cmdbuf *parent_base, struct ac_cmdbuf *child_base, bool allow_ib2)
 {
@@ -209,13 +251,20 @@ radv_ps5_cs_execute_secondary(struct ac_cmdbuf *parent_base, struct ac_cmdbuf *c
    struct radv_ps5_cs *const child = radv_ps5_cs(child_base);
    if (parent->status != VK_SUCCESS || child->status != VK_SUCCESS)
       return;
-   /* Keep the child's words together in one chunk of the parent, as the
-    * copies a packet's space check reserved would be. */
-   const uint32_t total = radv_ps5_cs_words(child);
-   if (parent->base.max_dw - parent->base.cdw < total)
-      radv_ps5_cs_grow(&parent->base, total);
-   util_dynarray_foreach (&child->chunks, struct radv_ps5_cs_chunk, chunk)
+   /* Each of the child's chunks lands whole in one chunk of the parent, so
+    * the parent's chunk boundaries stay packet boundaries, and the child's
+    * splits become the parent's. */
+   util_dynarray_foreach (&child->chunks, struct radv_ps5_cs_chunk, chunk) {
+      if (chunk->starts_submission)
+         radv_ps5_cs_split(&parent->base);
+      if (parent->base.max_dw - parent->base.cdw < chunk->cdw)
+         radv_ps5_cs_grow(&parent->base, chunk->cdw);
       radv_ps5_cs_append(parent, chunk->words, chunk->cdw);
+   }
+   if (child->buf_starts_submission)
+      radv_ps5_cs_split(&parent->base);
+   if (parent->base.max_dw - parent->base.cdw < child->base.cdw)
+      radv_ps5_cs_grow(&parent->base, child->base.cdw);
    radv_ps5_cs_append(parent, child->base.buf, child->base.cdw);
 }
 
@@ -351,6 +400,43 @@ radv_ps5_queue_claim(struct radv_ps5_queue *queue, uint32_t count, uint64_t seq)
    return (uint32_t *)queue->ring.cpu + start;
 }
 
+/* A run of a submission's words that must go to the GPU in one AGC submission:
+ * from a place the GPU state is the preamble's (a stream's start or a split)
+ * to the next such place. */
+struct radv_ps5_unit {
+   unsigned first_piece;
+   uint32_t words;
+   /* The unit starts an AGC submission after the first. */
+   bool starts_part;
+};
+
+/* The words of a stream in submission order, as chunks (the current one last). */
+static void
+radv_ps5_stream_pieces(const struct radv_ps5_cs *cs, struct util_dynarray *pieces)
+{
+   util_dynarray_foreach (&cs->chunks, struct radv_ps5_cs_chunk, chunk) {
+      if (chunk->cdw)
+         util_dynarray_append(pieces, *chunk);
+      else if (chunk->starts_submission)
+         util_dynarray_append(pieces, ((struct radv_ps5_cs_chunk){.starts_submission = true}));
+   }
+   util_dynarray_append(pieces, ((struct radv_ps5_cs_chunk){
+                                   .words = cs->base.buf,
+                                   .cdw = cs->base.cdw,
+                                   .max_dw = cs->base.max_dw,
+                                   .starts_submission = cs->buf_starts_submission,
+                                }));
+}
+
+static uint32_t
+radv_ps5_count_streams(struct ac_cmdbuf **streams, unsigned count)
+{
+   uint32_t words = 0;
+   for (unsigned i = 0; i < count; i++)
+      words += radv_ps5_cs_words(radv_ps5_cs(streams[i]));
+   return words;
+}
+
 static uint32_t *
 radv_ps5_copy_streams(uint32_t *at, struct ac_cmdbuf **streams, unsigned count)
 {
@@ -364,15 +450,6 @@ radv_ps5_copy_streams(uint32_t *at, struct ac_cmdbuf **streams, unsigned count)
       at += cs->base.cdw;
    }
    return at;
-}
-
-static uint32_t
-radv_ps5_count_streams(struct ac_cmdbuf **streams, unsigned count)
-{
-   uint32_t words = 0;
-   for (unsigned i = 0; i < count; i++)
-      words += radv_ps5_cs_words(radv_ps5_cs(streams[i]));
-   return words;
 }
 
 static VkResult
@@ -404,28 +481,92 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
       return VK_SUCCESS;
    }
 
-   /* One AGC submission: the initial preambles (every submission starts from
-    * the state they set, as each amdgpu submission does), the streams, the
-    * postambles, then the completion. */
-   const uint32_t count = radv_ps5_count_streams(submit->initial_preamble_cs, submit->initial_preamble_count) +
-                          radv_ps5_count_streams(submit->cs_array, submit->cs_count) +
-                          radv_ps5_count_streams(submit->postamble_cs, submit->postamble_count) +
-                          RADV_PS5_COMPLETION_WORDS;
+   /* The initial preambles (every submission starts from the state they set,
+    * as each amdgpu submission does), the streams, the postambles, then the
+    * completion. The streams and postambles are cut into units; units go
+    * into one AGC submission as long as they fit, and each further AGC
+    * submission starts with the preambles again. */
+   const uint32_t preamble_words = radv_ps5_count_streams(submit->initial_preamble_cs, submit->initial_preamble_count);
+   struct util_dynarray pieces, units;
+   util_dynarray_init(&pieces, NULL);
+   util_dynarray_init(&units, NULL);
+   for (unsigned i = 0; i < submit->cs_count + submit->postamble_count; i++) {
+      struct ac_cmdbuf *const stream =
+         i < submit->cs_count ? submit->cs_array[i] : submit->postamble_cs[i - submit->cs_count];
+      const unsigned first = util_dynarray_num_elements(&pieces, struct radv_ps5_cs_chunk);
+      radv_ps5_stream_pieces(radv_ps5_cs(stream), &pieces);
+      const unsigned end = util_dynarray_num_elements(&pieces, struct radv_ps5_cs_chunk);
+      for (unsigned p = first; p < end; p++) {
+         struct radv_ps5_cs_chunk *const piece = util_dynarray_element(&pieces, struct radv_ps5_cs_chunk, p);
+         if (p == first || piece->starts_submission)
+            util_dynarray_append(&units, ((struct radv_ps5_unit){.first_piece = p}));
+         util_dynarray_last_ptr(&units, struct radv_ps5_unit)->words += piece->cdw;
+      }
+   }
+
+   /* Plan: which unit starts each AGC submission, and the words in all. */
+   const unsigned unit_count = util_dynarray_num_elements(&units, struct radv_ps5_unit);
+   const uint32_t room = RADV_PS5_SUBMIT_MAX_DW - RADV_PS5_COMPLETION_WORDS;
+   uint32_t count = preamble_words + RADV_PS5_COMPLETION_WORDS;
+   uint32_t fill = preamble_words;
+   bool too_large = false;
+   for (unsigned u = 0; u < unit_count; u++) {
+      struct radv_ps5_unit *const unit = util_dynarray_element(&units, struct radv_ps5_unit, u);
+      if (preamble_words + unit->words > room)
+         too_large = true;
+      if (fill > preamble_words && fill + unit->words > room) {
+         unit->starts_part = true;
+         count += preamble_words;
+         fill = preamble_words;
+      }
+      fill += unit->words;
+      count += unit->words;
+   }
+
    const uint64_t seq = queue->submitted_seq + 1;
-   uint32_t *const words = radv_ps5_queue_claim(queue, count, seq);
+   uint32_t *const words = too_large ? NULL : radv_ps5_queue_claim(queue, count, seq);
    if (!words) {
       simple_mtx_unlock(&queue->submit_lock);
+      util_dynarray_fini(&pieces);
+      util_dynarray_fini(&units);
+      if (too_large)
+         fprintf(stderr, "radv/ps5: a submission holds more words between two splits than one AGC submission can\n");
       return VK_ERROR_DEVICE_LOST;
    }
+
+   struct util_dynarray starts;
+   util_dynarray_init(&starts, NULL);
+   util_dynarray_append(&starts, 0u);
    uint32_t *at = radv_ps5_copy_streams(words, submit->initial_preamble_cs, submit->initial_preamble_count);
-   at = radv_ps5_copy_streams(at, submit->cs_array, submit->cs_count);
-   at = radv_ps5_copy_streams(at, submit->postamble_cs, submit->postamble_count);
+   for (unsigned u = 0; u < unit_count; u++) {
+      const struct radv_ps5_unit *const unit = util_dynarray_element(&units, struct radv_ps5_unit, u);
+      if (unit->starts_part) {
+         util_dynarray_append(&starts, (uint32_t)(at - words));
+         at = radv_ps5_copy_streams(at, submit->initial_preamble_cs, submit->initial_preamble_count);
+      }
+      const unsigned end = u + 1 < unit_count ? util_dynarray_element(&units, struct radv_ps5_unit, u + 1)->first_piece
+                                              : util_dynarray_num_elements(&pieces, struct radv_ps5_cs_chunk);
+      for (unsigned p = unit->first_piece; p < end; p++) {
+         const struct radv_ps5_cs_chunk *const piece = util_dynarray_element(&pieces, struct radv_ps5_cs_chunk, p);
+         memcpy(at, piece->words, (size_t)piece->cdw * sizeof(uint32_t));
+         at += piece->cdw;
+      }
+   }
    radv_ps5_completion_words(at, (uint64_t)(uintptr_t)queue->marker, (uint32_t)seq);
    at += RADV_PS5_COMPLETION_WORDS;
    assert((uint32_t)(at - words) == count);
+   util_dynarray_fini(&pieces);
+   util_dynarray_fini(&units);
 
    p_atomic_set(&queue->submitted_seq, seq);
-   const int submitted = radv_ps5_submit(words, count, queue->marker, (uint32_t)seq);
+   int submitted = 0;
+   const unsigned parts = util_dynarray_num_elements(&starts, uint32_t);
+   for (unsigned i = 0; i < parts && submitted == 0; i++) {
+      const uint32_t start = *util_dynarray_element(&starts, uint32_t, i);
+      const uint32_t end = i + 1 < parts ? *util_dynarray_element(&starts, uint32_t, i + 1) : count;
+      submitted = radv_ps5_submit(words + start, end - start, queue->marker, (uint32_t)seq);
+   }
+   util_dynarray_fini(&starts);
    simple_mtx_unlock(&queue->submit_lock);
    if (submitted != 0) {
       fprintf(stderr, "radv/ps5: sceAgcDriverSubmitDcb failed: 0x%08x\n", (unsigned)submitted);
@@ -455,4 +596,6 @@ radv_ps5_cs_init_functions(struct radv_ps5_winsys *ws)
    ws->base.cs_dump = radv_ps5_cs_dump;
    ws->base.cs_annotate = radv_ps5_cs_annotate;
    ws->base.cs_pad = radv_ps5_cs_pad;
+   ws->base.cs_split_due = radv_ps5_cs_split_due;
+   ws->base.cs_split = radv_ps5_cs_split;
 }
