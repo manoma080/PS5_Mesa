@@ -121,6 +121,10 @@ private:
     // The microblock size
     ADDR_EXTENT3D m_microBlockSize;
 
+    // Each microblock is 256 contiguous bytes holding exactly that rectangle, which the microblock
+    // copies need
+    BOOL_32 m_microBlocksClean;
+
     // Number of 'x' bits at the bottom of the equation. Must be a pow2 and at least 1.
     // This will be used as a simple optimization to batch together operations on adjacent x pixels.
     UINT_32  m_maxExpandX;

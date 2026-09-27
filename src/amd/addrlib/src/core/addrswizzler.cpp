@@ -40,6 +40,8 @@ LutAddresser::LutAddresser()
     m_sLutMask(0),
     m_blockBits(0),
     m_blockSize(),
+    m_microBlockSize(),
+    m_microBlocksClean(FALSE),
     m_bpeLog2(0),
     m_bit(),
     m_lutData()
@@ -100,22 +102,40 @@ void LutAddresser::InitSwizzleProps()
         m_sLutMask |= m_bit[i].s;
     }
 
-    // Derive the microblock size from the swizzle equation.
+    // Derive the microblock size from the swizzle equation: the rectangle of the coordinate bits the
+    // bottom 8 bits (256B) are formed from, as far as they are the low bits of each coordinate.
     UINT_32 xMbMask = 0;
     UINT_32 yMbMask = 0;
     UINT_32 zMbMask = 0;
+    UINT_32 sMbMask = 0;
     for (UINT_32 i = 0; i < 8; i++)
     {
         xMbMask |= m_bit[i].x;
         yMbMask |= m_bit[i].y;
         zMbMask |= m_bit[i].z;
+        sMbMask |= m_bit[i].s;
     }
-    m_microBlockSize.width  = xMbMask + 1;
-    m_microBlockSize.height = yMbMask + 1;
-    m_microBlockSize.depth  = zMbMask + 1;
-    ADDR_ASSERT(IsPow2(m_microBlockSize.width));
-    ADDR_ASSERT(IsPow2(m_microBlockSize.height));
-    ADDR_ASSERT(IsPow2(m_microBlockSize.depth));
+    m_microBlockSize.width  = (xMbMask + 1) & ~xMbMask;
+    m_microBlockSize.height = (yMbMask + 1) & ~yMbMask;
+    m_microBlockSize.depth  = (zMbMask + 1) & ~zMbMask;
+
+    // The microblock copies (SIMD swizzles, hybrid memcpy) take each microblock as 256 contiguous bytes
+    // holding exactly that rectangle. Not every equation has one: GFX10's (non-RB+) 64KB_R_X forms the
+    // bottom 8 bits of an 8bpp surface from y4 but not y3, and x3 of a 16bpp one flips bit 8 as well as
+    // bit 7 (the pipe/bank XOR).
+    m_microBlocksClean = (xMbMask == (m_microBlockSize.width  - 1)) &&
+                         (yMbMask == (m_microBlockSize.height - 1)) &&
+                         (zMbMask == (m_microBlockSize.depth  - 1)) &&
+                         (sMbMask == 0) &&
+                         (((m_microBlockSize.width * m_microBlockSize.height * m_microBlockSize.depth)
+                           << m_bpeLog2) == 256);
+    for (UINT_32 i = 8; i < ADDR_MAX_EQUATION_BIT; i++)
+    {
+        if ((m_bit[i].x & xMbMask) || (m_bit[i].y & yMbMask) || (m_bit[i].z & zMbMask))
+        {
+            m_microBlocksClean = FALSE;
+        }
+    }
 
     // An expandX of 1 is a no-op
     m_maxExpandX = 1;
@@ -817,7 +837,9 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
     // swizzle function (they are all swizzle-agnostic beyond those 256B).
     UINT_64 microSwKey = GetMicroSwKey(reinterpret_cast<const UINT_64*>(&m_bit[0]));
 
-    if (flags.blockMemcpy)
+    // The memcpy layouts copy the mip tail (and hybrid memcpy everything) by microblock. Without clean
+    // microblocks the layout is the element copy's instead, which both directions share.
+    if (flags.blockMemcpy && m_microBlocksClean)
     {
 #if ADDR_HAS_AVX2
         if (CpuSupportsAvx2())
@@ -831,7 +853,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
         }
     }
 
-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
+    if ((pfnRet == nullptr) && flags.hybridMemcpy && m_microBlocksClean)
     {
 #if ADDR_HAS_AVX2
         if (CpuSupportsAvx2())
@@ -846,7 +868,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
     }
 
     // If this is one of the known microswizzles and CPU support is present, use a hybrid copy that does
-    // SIMD swizzling for aligned regions and falls back for unaligned edges.
+    // SIMD swizzling for aligned regions and falls back for unaligned edges. They copy whole microblocks.
 #if ADDR_HAS_AVX2
     static constexpr struct {
         UINT_64                 microSwKey;
@@ -868,7 +890,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
         { GetMicroSwKey(MicroSw_Z_1BPE_AVX2::MicroEq),   CopyMemImgHybrid<MicroSw_Z_1BPE_AVX2>},
         { GetMicroSwKey(MicroSw_D_1BPE_AVX2::MicroEq),   CopyMemImgHybrid<MicroSw_D_1BPE_AVX2>}
     };
-    if ((pfnRet == nullptr) && CpuSupportsAvx2())
+    if ((pfnRet == nullptr) && m_microBlocksClean && CpuSupportsAvx2())
     {
         for (const auto& func : AvxFuncs)
         {
@@ -902,7 +924,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
         { GetMicroSwKey(MicroSw_Z_1BPE_NEON::MicroEq),   CopyMemImgHybrid<MicroSw_Z_1BPE_NEON>},
         { GetMicroSwKey(MicroSw_D_1BPE_NEON::MicroEq),   CopyMemImgHybrid<MicroSw_D_1BPE_NEON>}
     };
-    if ((pfnRet == nullptr) && CpuSupportsNeon())
+    if ((pfnRet == nullptr) && m_microBlocksClean && CpuSupportsNeon())
     {
         for (const auto& func : NeonFuncs)
         {
@@ -949,7 +971,8 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyImgMemFunc(
     ) const
 {
     UnalignedCopyMemImgFunc pfnRet = nullptr;
-    if (flags.blockMemcpy)
+    // As for copies to images: without clean microblocks, the memcpy layout is the element copy's.
+    if (flags.blockMemcpy && m_microBlocksClean)
     {
 #if ADDR_HAS_AVX2
         if (CpuSupportsAvx2())
@@ -963,7 +986,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyImgMemFunc(
         }
     }
 
-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
+    if ((pfnRet == nullptr) && flags.hybridMemcpy && m_microBlocksClean)
     {
 #if ADDR_HAS_AVX2
         if (CpuSupportsAvx2())
