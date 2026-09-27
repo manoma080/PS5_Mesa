@@ -410,9 +410,11 @@ build_node_to_addr(const struct radv_compiler_info *compiler_info, nir_builder *
 {
    nir_def *addr = skip_type_and ? node : nir_iand_imm(b, node, ~7ull);
    addr = nir_ishl_imm(b, addr, 3);
-   /* Assumes everything is in the top half of address space, which is true in
-    * GFX9+ for now. */
-   return compiler_info->ac->gfx_level >= GFX9 ? nir_ior_imm(b, addr, 0xffffull << 48) : addr;
+   /* The node holds address bits 3-47: sign-extend bit 47 into the canonical
+    * address, as node_to_addr does for the builders. A GFX9+ address may be in
+    * either half: amdgpu places buffers in the top half, other platforms (the
+    * PS5, whose GPU addresses are its CPU addresses) in the bottom one. */
+   return compiler_info->ac->gfx_level >= GFX9 ? nir_ishr_imm(b, nir_ishl_imm(b, addr, 16), 16) : addr;
 }
 
 nir_def *

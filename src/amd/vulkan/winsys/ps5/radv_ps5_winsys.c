@@ -14,6 +14,7 @@
 #include "addrlib/src/amdgpu_asic_addr.h"
 #include "tools/radv_debug.h"
 #include "util/os_time.h"
+#include "util/u_debug.h"
 #include "util/u_atomic.h"
 #include "util/u_math.h"
 #include "ac_linux_drm.h"
@@ -254,8 +255,9 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * unmapped page far past every buffer the process had, even for an empty
     * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
     * and host builds are not offered, so no ray tracing is reported until the
-    * build runs. */
-   info->compiler_info.has_image_bvh_intersect_ray = false;
+    * build runs. RADV_PS5_RAY_TRACING=1 reports it anyway, to probe the
+    * build. */
+   info->compiler_info.has_image_bvh_intersect_ray = debug_get_bool_option("RADV_PS5_RAY_TRACING", false);
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
