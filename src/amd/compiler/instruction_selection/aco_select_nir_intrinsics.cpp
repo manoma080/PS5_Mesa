@@ -3282,10 +3282,10 @@ visit_load_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
    info.align_mul = nir_intrinsic_align_mul(instr);
    info.align_offset = nir_intrinsic_align_offset(instr);
    info.cache = get_cache_flags(ctx, ACCESS_IS_SWIZZLED_AMD, ac_access_type_load);
-   info.swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 0;
+   info.swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 0;
    info.sync = memory_sync_info(storage_scratch, semantic_private);
    info.disable_wqm = nir_intrinsic_access(instr) & ACCESS_SKIP_HELPERS;
-   if (ctx->program->gfx_level >= GFX9) {
+   if (!ctx->program->dev.mubuf_scratch) {
       if (nir_src_is_const(instr->src[0])) {
          info.const_offset = nir_src_as_uint(instr->src[0]);
          if (ctx->program->stack_ptr.id())
@@ -3329,12 +3329,12 @@ visit_store_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
    unsigned write_count = 0;
    Temp write_datas[32];
    unsigned offsets[32];
-   unsigned swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 16;
+   unsigned swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 16;
    split_buffer_store(ctx, nir_intrinsic_align_mul(instr), nir_intrinsic_align_offset(instr), false,
                       RegType::vgpr, data, writemask, swizzle_component_size, &write_count,
                       write_datas, offsets);
 
-   if (ctx->program->gfx_level >= GFX9) {
+   if (!ctx->program->dev.mubuf_scratch) {
       uint32_t max = ctx->program->dev.scratch_global_offset_max + 1;
       offset = nir_src_is_const(instr->src[1]) ? Temp(0, s1) : offset;
       uint32_t base_const_offset =

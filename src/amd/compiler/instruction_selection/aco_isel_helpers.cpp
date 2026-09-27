@@ -797,7 +797,7 @@ add_startpgm(struct isel_context* ctx, bool is_callee)
 
    /* epilog has no scratch */
    if (ctx->args->scratch_offset.used) {
-      if (ctx->program->gfx_level < GFX9) {
+      if (ctx->program->dev.mubuf_scratch) {
          /* Stash these in the program so that they can be accessed later when
           * handling spilling.
           */

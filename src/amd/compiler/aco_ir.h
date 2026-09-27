@@ -2303,6 +2303,9 @@ struct DeviceInfo {
    bool xnack_enabled = false;
    bool sram_ecc_enabled = false;
    bool has_point_sample_accel = false;
+   /* Scratch goes through buffer instructions with a scratch resource (GFX6-8,
+    * and GFX9-GFX10.3 where a shader cannot set FLAT_SCRATCH), not scratch_*. */
+   bool mubuf_scratch = false;
    bool has_gfx6_mrt_export_bug = false;
    bool has_desc_resource_level = false;
 

@@ -127,6 +127,10 @@ struct ac_compiler_info {
    uint32_t has_sram_ecc_enabled : 1;
    /* Whether image_sample* instructions can be either a sampler or no-sampler access.*/
    uint32_t has_point_sample_accel : 1;
+   /* Whether a shader may set its own FLAT_SCRATCH base (s_setreg on GFX10),
+    * which GFX9-GFX10.3 scratch instructions need; without it, scratch goes
+    * through buffer instructions, as on GFX8. */
+   uint32_t has_flat_scratch : 1;
    uint32_t has_fast_fma32 : 1;
    /* Whether chips support fused v_fma_mix* instructions.
     * Otherwise, unfused v_mad_mix* is available on GFX9.

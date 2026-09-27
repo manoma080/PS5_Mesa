@@ -228,6 +228,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
     * RADV smoke title's geometry and tessellation checks). */
    info->compiler_info.has_accelerated_dot_product = false;
+   /* Every wave of a shader using scratch_* instructions faulted (MEMVIOL) a
+    * few instructions in, where it had set FLAT_SCRATCH with s_setreg; the
+    * same shaders through buffer instructions, as on GFX8, run (the smoke
+    * title's scratch checks, graphicsfuzz's large private arrays). */
+   info->compiler_info.has_flat_scratch = false;
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;

@@ -1225,7 +1225,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
    uint32_t scratch_size = ctx.program->config->scratch_bytes_per_wave / ctx.program->wave_size;
 
    uint32_t offset_range;
-   if (ctx.program->gfx_level >= GFX9) {
+   if (!ctx.program->dev.mubuf_scratch) {
       offset_range =
          ctx.program->dev.scratch_global_offset_max - ctx.program->dev.scratch_global_offset_min;
    } else {
@@ -1243,7 +1243,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
    unsigned bld_block = block.index;
    if (block.kind & block_kind_top_level) {
       rsrc_bld.reset(&instructions);
-   } else if (ctx.scratch_rsrc == Temp() && (!overflow || ctx.program->gfx_level < GFX9)) {
+   } else if (ctx.scratch_rsrc == Temp() && (!overflow || ctx.program->dev.mubuf_scratch)) {
       Block* tl_block = nullptr;
       for (int i = block.index; i >= 0; i--) {
          if (ctx.program->blocks[i].kind & block_kind_contains_call)
@@ -1281,7 +1281,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
       offset_bld.reset(&instructions);
 
    *offset = spill_slot * 4;
-   if (ctx.program->gfx_level >= GFX9) {
+   if (!ctx.program->dev.mubuf_scratch) {
       *offset += ctx.program->dev.scratch_global_offset_min;
 
       if (ctx.scratch_rsrc == Temp() || overflow) {
@@ -1396,7 +1396,7 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
          if (i < lds_slots) {
             bld.ds(aco_opcode::ds_write_addtid_b32, bld.m0(ctx.lds_m0_zero), elem, lds_offset);
             lds_offset += workgroup_size * 4;
-         } else if (ctx.program->gfx_level >= GFX9) {
+         } else if (!ctx.program->dev.mubuf_scratch) {
             bld.scratch(aco_opcode::scratch_store_dword, Operand(v1), ctx.scratch_rsrc, elem,
                         offset, memory_sync_info(storage_vgpr_spill, semantic_private));
             offset += 4;
@@ -1410,7 +1410,7 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
       }
    } else if (lds_slots) {
       bld.ds(aco_opcode::ds_write_addtid_b32, bld.m0(ctx.lds_m0_zero), temp, lds_offset);
-   } else if (ctx.program->gfx_level >= GFX9) {
+   } else if (!ctx.program->dev.mubuf_scratch) {
       bld.scratch(aco_opcode::scratch_store_dword, Operand(v1), ctx.scratch_rsrc, temp, offset,
                   memory_sync_info(storage_vgpr_spill, semantic_private));
    } else {
@@ -1460,7 +1460,7 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
             bld.ds(aco_opcode::ds_read_addtid_b32, Definition(tmp), bld.m0(ctx.lds_m0_zero),
                    lds_offset);
             lds_offset += workgroup_size * 4;
-         } else if (ctx.program->gfx_level >= GFX9) {
+         } else if (!ctx.program->dev.mubuf_scratch) {
             bld.scratch(aco_opcode::scratch_load_dword, Definition(tmp), Operand(v1),
                         ctx.scratch_rsrc, offset,
                         memory_sync_info(storage_vgpr_spill, semantic_private));
@@ -1477,7 +1477,7 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
       bld.insert(vec);
    } else if (lds_slots) {
       bld.ds(aco_opcode::ds_read_addtid_b32, def, bld.m0(ctx.lds_m0_zero), lds_offset);
-   } else if (ctx.program->gfx_level >= GFX9) {
+   } else if (!ctx.program->dev.mubuf_scratch) {
       bld.scratch(aco_opcode::scratch_load_dword, def, Operand(v1), ctx.scratch_rsrc, offset,
                   memory_sync_info(storage_vgpr_spill, semantic_private));
    } else {
@@ -1916,7 +1916,7 @@ spill(Program* program)
       extra_vgprs = DIV_ROUND_UP(sgpr_spills * 2, program->wave_size) + 1;
    /* add extra SGPRs required for spilling VGPRs */
    if (demand.vgpr + extra_vgprs > limit.vgpr || program->max_call_spills.vgpr) {
-      if (program->gfx_level >= GFX9)
+      if (!program->dev.mubuf_scratch)
          extra_sgprs =
             program->stack_ptr.id() ? 2 : 1; /* SADDR + scc for stack pointer additions */
       else
