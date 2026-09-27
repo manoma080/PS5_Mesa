@@ -589,8 +589,11 @@ radv_graphics_pipeline_import_lib(const struct radv_device *device, struct radv_
    pipeline->dynamic_states |= lib->base.dynamic_states;
    pipeline->active_stages |= lib->base.active_stages;
 
-   /* Import binaries when LTO is disabled and when the library doesn't retain any shaders. */
-   if (!import_pipeline_binaries &&
+   /* Import binaries when LTO is disabled and when the library doesn't retain any shaders. A
+    * library whose geometry shader runs as compute once linked is compiled again instead
+    * (radv_pipeline_load_retained_shaders).
+    */
+   if (!import_pipeline_binaries && !lib->gs_compute_link &&
        (lib->base.has_pipeline_binaries || radv_should_import_lib_binaries(pipeline->base.create_flags))) {
       import_binaries = true;
    }
@@ -2303,13 +2306,15 @@ radv_pipeline_load_retained_shaders(const struct radv_device *device, const VkGr
    if (!libs_info)
       return;
 
-   /* Nothing to load if fast-linking is enabled and if there is no retained shaders. */
-   if (radv_should_import_lib_binaries(create_flags))
-      return;
-
    for (uint32_t i = 0; i < libs_info->libraryCount; i++) {
       VK_FROM_HANDLE(radv_pipeline, pipeline_lib, libs_info->pLibraries[i]);
       struct radv_graphics_lib_pipeline *gfx_pipeline_lib = radv_pipeline_to_graphics_lib(pipeline_lib);
+
+      /* Nothing to load if fast-linking is enabled and if there is no retained shaders, but a
+       * geometry shader that runs as compute once linked is compiled here with the whole state.
+       */
+      if (radv_should_import_lib_binaries(create_flags) && !gfx_pipeline_lib->gs_compute_link)
+         continue;
 
       radv_pipeline_import_retained_shaders(device, gfx_pipeline_lib, stages);
    }
@@ -2420,6 +2425,10 @@ radv_skip_graphics_pipeline_compile(const struct radv_device *device, const VkGr
          struct radv_graphics_lib_pipeline *gfx_pipeline_lib = radv_pipeline_to_graphics_lib(pipeline_lib);
 
          assert(pipeline_lib->type == RADV_PIPELINE_GRAPHICS_LIB);
+
+         /* Its geometry shader runs as compute, compiled with the whole state. */
+         if (gfx_pipeline_lib->gs_compute_link)
+            return false;
 
          active_stages |= gfx_pipeline_lib->base.active_stages;
 
@@ -2998,8 +3007,14 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       .flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT,
    };
    VkResult result = VK_SUCCESS;
-   const bool retain_shaders =
+   const bool app_retains_shaders =
       !!(pipeline->base.create_flags & VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT);
+   /* A library's geometry shader may have to be compiled again as compute
+    * once linked (radv_graphics_lib_pipeline.gs_compute_link): keep it. */
+   const bool retain_shaders =
+      app_retains_shaders ||
+      ((pipeline->base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) && compiler_info->key.no_legacy_gs &&
+       stages[MESA_SHADER_GEOMETRY].stage != MESA_SHADER_NONE);
    struct radv_retained_shaders *retained_shaders = NULL;
 
    int64_t pipeline_start = os_time_get_nano();
@@ -3017,7 +3032,7 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
     */
    if (fast_linking_enabled) {
       skip_shaders_cache = true;
-   } else if (retain_shaders) {
+   } else if (app_retains_shaders) {
       assert(pipeline->base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR);
       for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
          if (stages[i].stage != MESA_SHADER_NONE && !stages[i].spirv.size) {
@@ -3424,6 +3439,22 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
    }
 }
 
+/* Whether the library kept its geometry shader: as NIR, or as SPIR-V after a
+ * shaders cache hit (not as a module identifier alone). */
+static bool
+radv_graphics_lib_can_recompile_gs(const struct radv_graphics_lib_pipeline *lib)
+{
+   if (lib->retained_shaders.stages[MESA_SHADER_GEOMETRY].serialized_nir_size)
+      return true;
+
+   for (uint32_t i = 0; i < lib->stage_count; i++) {
+      const VkPipelineShaderStageCreateInfo *sinfo = &lib->stages[i];
+      if (sinfo->stage == VK_SHADER_STAGE_GEOMETRY_BIT)
+         return sinfo->module != VK_NULL_HANDLE || vk_find_struct_const(sinfo->pNext, SHADER_MODULE_CREATE_INFO);
+   }
+   return false;
+}
+
 static VkResult
 radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, struct radv_device *device,
                                 struct vk_pipeline_cache *cache, const VkGraphicsPipelineCreateInfo *pCreateInfo)
@@ -3488,6 +3519,15 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
 
       radv_graphics_pipeline_state_finish(device, &gfx_state);
    }
+
+   /* A geometry shader capturing transform feedback runs as compute, which
+    * needs state a library may not have (radv_gs_compute_wanted): pipelines
+    * built from the library compile it again, from what it retained. */
+   const struct radv_shader *gs = pipeline->base.base.shaders[MESA_SHADER_GEOMETRY];
+   pipeline->gs_compute_link =
+      result == VK_SUCCESS && device->compiler_info.key.no_legacy_gs && radv_graphics_lib_can_recompile_gs(pipeline) &&
+      (pipeline->base.base.gs_compute ||
+       (gs && (gs->info.so.enabled_stream_buffers_mask || debug_get_bool_option("RADV_PS5_GS_COMPUTE", false))));
 
    return result;
 }

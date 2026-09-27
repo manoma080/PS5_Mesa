@@ -181,6 +181,11 @@ struct radv_graphics_lib_pipeline {
 
    struct radv_retained_shaders retained_shaders;
 
+   /* Its geometry shader runs as compute (radv_gs_compute.h) once the state
+    * it lacks is known: pipelines built from it compile it again with that
+    * state instead of fast-linking it. */
+   bool gs_compute_link;
+
    void *mem_ctx;
 
    unsigned stage_count;
