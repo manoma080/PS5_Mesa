@@ -63,10 +63,10 @@ lower_vs_output_to_memory(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 /* Memory writes of the application's own (buffers, images, device addresses)
- * happen once, in the count pass: the other copies of the geometry shader drop
- * them. poly strips the global and bindless forms; these are RADV's, still
- * derefs and SSBO intrinsics when poly runs. An atomic whose result is used
- * stays. */
+ * happen once per invocation, in one copy of the geometry shader: the other
+ * copies drop them. poly strips the global and bindless forms; these are
+ * RADV's, still derefs and SSBO intrinsics when poly runs. An atomic whose
+ * result is used stays. */
 static bool
 strip_app_memory_writes(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -138,6 +138,10 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
    NIR_PASS(_, gs, nir_lower_vars_to_ssa);
    radv_optimize_nir(vs, vs_stage->key.optimisations_disabled);
    radv_optimize_nir(gs, gs_stage->key.optimisations_disabled);
+   /* poly keeps the memory writes in a count pass only when the shader's
+    * information says it writes memory: gather it again after lowering. */
+   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+   nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
 
    /* The vertex shader: its outputs to memory, where the geometry shader reads
     * them. The mask fixes the layout both sides use. */
@@ -150,9 +154,12 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
    NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
 
-   /* The count pass keeps the application's memory writes; the others run the
-    * geometry shader again and must not repeat them. */
-   strip_side_effects(gs);
+   /* The application's memory writes happen once per invocation: in the count
+    * pass when poly made one, in the GS proper otherwise (static counts). The
+    * rasterization copy runs the shader again per output vertex and never
+    * keeps them. */
+   if (count)
+      strip_side_effects(gs);
    strip_side_effects(rast);
 
    /* poly's bookkeeping lives in shader temporaries: make them SSA as the
@@ -316,6 +323,37 @@ radv_gs_compute_lower_sysvals(nir_shader *nir, const struct radv_compiler_info *
    return progress;
 }
 
+/* Only invocations inside poly's grid run: (vertices, instances) for the
+ * vertex shader, (primitives, instances) for the geometry shader's passes,
+ * from the parameter blocks. A dispatch covers whole workgroups; the rest of
+ * the last one must write nothing. */
+static void
+guard_grid(nir_shader *nir, enum radv_gs_compute_kind kind)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *params;
+   unsigned grid_offset;
+   if (kind == RADV_GS_COMPUTE_VS) {
+      params = nir_load_vertex_param_buffer_poly(&b);
+      grid_offset = offsetof(struct poly_vertex_params, grid);
+   } else {
+      params = nir_load_geometry_param_buffer_poly(&b);
+      grid_offset = offsetof(struct poly_geometry_params, grid);
+   }
+   nir_def *grid = nir_load_global_constant(&b, 2, 32, nir_iadd_imm(&b, params, grid_offset), .align_mul = 4);
+   nir_def *id = nir_load_global_invocation_id(&b, 32);
+   nir_def *inside = nir_iand(&b, nir_ult(&b, nir_channel(&b, id, 0), nir_channel(&b, grid, 0)),
+                              nir_ult(&b, nir_channel(&b, id, 1), nir_channel(&b, grid, 1)));
+   nir_push_if(&b, inside);
+   nir_cf_reinsert(&body, b.cursor);
+   nir_pop_if(&b, NULL);
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 /* As RADV's compute shaders, and poly's OpenCL helpers' global IDs without a
  * base (a dispatch here starts at 0). */
 static const nir_lower_compute_system_values_options compute_sysval_options = {
@@ -346,6 +384,10 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
       radv_nir_shader_info_pass(compiler_info, nir, &stage.layout, &stage.key, gfx_state, RADV_PIPELINE_GRAPHICS,
                                 false, &vs_info);
    }
+
+   /* The pre-GS setup is one invocation; the others cover poly's grid. */
+   if (kind != RADV_GS_COMPUTE_PRE_GS)
+      guard_grid(nir, kind);
 
    /* Everything runs as compute, 64 invocations a workgroup along x. */
    nir->info.stage = MESA_SHADER_COMPUTE;

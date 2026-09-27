@@ -92,6 +92,37 @@ struct radv_gs_compute_pipeline {
    uint64_t vs_outputs;
 };
 
+/* The draw's topology as poly names it, from RADV's dynamic state (which
+ * holds the hardware encoding, V_008958_DI_PT_*). */
+static inline enum mesa_prim
+radv_gs_compute_input_prim(unsigned di_pt)
+{
+   switch (di_pt) {
+   case V_008958_DI_PT_POINTLIST:
+      return MESA_PRIM_POINTS;
+   case V_008958_DI_PT_LINELIST:
+      return MESA_PRIM_LINES;
+   case V_008958_DI_PT_LINESTRIP:
+      return MESA_PRIM_LINE_STRIP;
+   case V_008958_DI_PT_TRILIST:
+      return MESA_PRIM_TRIANGLES;
+   case V_008958_DI_PT_TRISTRIP:
+      return MESA_PRIM_TRIANGLE_STRIP;
+   case V_008958_DI_PT_TRIFAN:
+      return MESA_PRIM_TRIANGLE_FAN;
+   case V_008958_DI_PT_LINELIST_ADJ:
+      return MESA_PRIM_LINES_ADJACENCY;
+   case V_008958_DI_PT_LINESTRIP_ADJ:
+      return MESA_PRIM_LINE_STRIP_ADJACENCY;
+   case V_008958_DI_PT_TRILIST_ADJ:
+      return MESA_PRIM_TRIANGLES_ADJACENCY;
+   case V_008958_DI_PT_TRISTRIP_ADJ:
+      return MESA_PRIM_TRIANGLE_STRIP_ADJACENCY;
+   default:
+      return MESA_PRIM_PATCHES;
+   }
+}
+
 /* The hardware topology the rasterization copy draws for poly's output mode. */
 static inline unsigned
 radv_gs_compute_rast_topology(enum mesa_prim mode)

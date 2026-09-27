@@ -285,7 +285,8 @@ endif
 # (docs/RADV_GS_COMPUTE.md in PS5_Vulkan).
 radv_link_with = []
 if with_radv_ps5
-  radv_deps += idep_libpoly
+  # poly's bindings are compiled into libpoly_nir: RADV needs only their header.
+  radv_deps += declare_dependency(sources : [libpoly_shaders[1]])
   radv_link_with += libpoly_nir
   radv_flags += '-DRADV_GS_COMPUTE=1'
   libradv_files += files('radv_gs_compute.c', 'radv_gs_compute.h')
