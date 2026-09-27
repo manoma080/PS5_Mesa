@@ -229,15 +229,13 @@ radv_shader_fp16_enabled(const struct radv_physical_device *pdev)
 bool
 radv_host_image_copy_enabled(const struct radv_physical_device *pdev)
 {
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   /* TODO: HIC is supported on GFX10 but the recent addrlib bump introduced few regressions that
-    * should be fixed soon, it's also still missing AVX for some formats. Let's not enable it by
-    * default for now.
+   /* GFX10's (non-RB+) swizzles failed addrlib's microblock copies: an 8bpp 64KB_R_X surface forms
+    * its bottom 256B from y4 and not y3 (addrlib trapped), and x3 of a 16bpp 64KB_R_X or 64KB_Z_X
+    * microblock also flips bit 8 (half of every microblock landed in another one). addrlib now copies
+    * those per element (LutAddresser::InitSwizzleProps). GFX10.1's swizzles are GFX10's, whatever
+    * the GPU's level (the PS5's).
     */
-   /* GFX10.1's swizzles are GFX10's, whatever the GPU's level (the PS5's). */
-   const bool gfx10_swizzles = pdev->info.gfx_level == GFX10 || pdev->info.gfx10_1_swizzles;
-   return (pdev->info.gfx_level >= GFX10_3 && !gfx10_swizzles) ||
-          (gfx10_swizzles && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
+   return pdev->info.gfx_level >= GFX10;
 }
 
 static bool

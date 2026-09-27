@@ -231,11 +231,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
-   /* Upstream keeps host image copy off for GFX10's swizzles (known addrlib
-    * regressions): these cases fail the same way on this console as in Mesa
-    * CI's navi10 list (dEQP-VK.image.host_image_copy.*.4_1_0.*, and
-    * depth_stencil.s8_uint traps). */
-   info->gfx10_1_swizzles = true;
    /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
     * RADV_DEBUG=nongg: 31 of 33 cases), and neither AGC library exports a
     * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
