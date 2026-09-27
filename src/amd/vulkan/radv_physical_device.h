@@ -226,8 +226,9 @@ static inline bool
 radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
-    * VK_DEVICE_TIMELINE_MODE_EMULATED. */
-   return pdev->info.has_timeline_syncobj &&
+    * VK_DEVICE_TIMELINE_MODE_EMULATED: the winsys's own sync type must be the timeline, which
+    * has_timeline_syncobj alone does not say when timelines are emulated over binary syncs. */
+   return pdev->info.has_timeline_syncobj && (pdev->syncobj_sync_type.features & VK_SYNC_FEATURE_TIMELINE) &&
           radv_sparse_enabled(pdev);
 }
 
