@@ -212,8 +212,10 @@ struct ac_compiler_info {
    /* GFX6-GFX12, except GFX9: SMEM loads on NULL PRT page don't work. */
    uint32_t has_smem_with_null_prt_bug : 1;
    uint32_t has_desc_resource_level : 1;
-
-   uint32_t reserved : 1;
+   /* Whether NGG exports per-primitive parameters the PS reads
+    * (SPI_PS_INPUT_CNTL PRIM_ATTR, GFX10.3+), as it does a VS's implicit
+    * primitive ID; without them the ID goes per vertex, as on GFX10.1. */
+   uint32_t has_ngg_per_prim_params : 1;
 };
 
 struct radeon_info {

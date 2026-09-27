@@ -415,7 +415,7 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
 }
 
 static void
-radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
+radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_shader *nir,
                          const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
                          bool export_prim_id, bool export_clip_cull_dists)
 {
@@ -429,8 +429,9 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
    /* Implicit primitive ID for VS and TES is added by ac_nir_lower_legacy_vs / ac_nir_lower_ngg,
     * it can be configured as either a per-vertex or per-primitive output depending on the GPU.
     */
+   const enum amd_gfx_level gfx_level = ac->gfx_level;
    const bool implicit_prim_id_per_prim =
-      export_prim_id && info->is_ngg && gfx_level >= GFX10_3 && nir->info.stage == MESA_SHADER_VERTEX;
+      export_prim_id && info->is_ngg && ac->has_ngg_per_prim_params && nir->info.stage == MESA_SHADER_VERTEX;
    const bool implicit_prim_id_per_vertex =
       export_prim_id && !implicit_prim_id_per_prim &&
       (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL);
@@ -1406,7 +1407,7 @@ radv_link_shaders_info(const struct radv_compiler_info *compiler_info, struct ra
       const bool ps_prim_id_in = !fs_stage || fs_stage->info.ps.prim_id_input;
       const bool ps_clip_dists_in = !fs_stage || !!fs_stage->info.ps.input_clips_culls_mask;
 
-      radv_set_vs_output_param(compiler_info->ac->gfx_level, prerast_stage->nir, gfx_state, &prerast_stage->info,
+      radv_set_vs_output_param(compiler_info->ac, prerast_stage->nir, gfx_state, &prerast_stage->info,
                                ps_prim_id_in, ps_clip_dists_in);
    }
 

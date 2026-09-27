@@ -333,6 +333,7 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
                                  info->family == CHIP_KRACKAN1 || info->gfx_level == GFX11_7;
    out->has_flat_scratch = info->gfx_level >= GFX9;
    out->has_cs_wave_id = info->gfx_level >= GFX10_3;
+   out->has_ngg_per_prim_params = info->gfx_level >= GFX10_3;
    out->has_fast_fma32 = info->gfx_level >= GFX9 || info->family == CHIP_TAHITI ||
                          info->family == CHIP_HAWAII || info->family == CHIP_CARRIZO;
    out->has_fma_mix = info->gfx_level >= GFX10 || info->family == CHIP_VEGA12 ||

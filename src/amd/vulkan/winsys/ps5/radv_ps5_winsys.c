@@ -243,6 +243,13 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * GFX10.3 wave ID (bits 20-24) reads 0, as on GFX10.1, whose ordered wave
     * ID serves instead. */
    info->compiler_info.has_cs_wave_id = false;
+   /* A fragment shader reading gl_PrimitiveID that no earlier stage writes read
+    * 0 for every primitive behind an NGG vertex shader, which exports it as a
+    * per-primitive parameter on GFX10.3 (dEQP-VK.pipeline.*.misc.
+    * implicit_primitive_id; the RADV smoke title's primitive ID check). The
+    * legacy vertex shader's per-vertex ID read 0 and 1 as it should; the
+    * parameter cache is GFX10.1's, so the ID goes per vertex here too. */
+   info->compiler_info.has_ngg_per_prim_params = false;
    /* Every acceleration structure build faulted the GPU (a write to an
     * unmapped page far past every buffer the process had, even for an empty
     * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
