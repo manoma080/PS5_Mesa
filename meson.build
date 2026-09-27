@@ -979,6 +979,8 @@ with_driver_using_cl = [
   with_gallium_rusticl,
   with_nouveau_vk, with_imagination_vk,
   with_kosmickrisp_vk,
+  # The PS5 RADV runs the geometry shaders NGG cannot as compute, with poly.
+  with_radv_ps5,
 ].contains(true)
 
 if get_option('mesa-clc') == 'system'
@@ -997,7 +999,7 @@ with_llvm = with_llvm \
 
 with_poly = [
   with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
-  with_kosmickrisp_vk,
+  with_kosmickrisp_vk, with_radv_ps5,
 ].contains(true)
 
 dep_clc = null_dep

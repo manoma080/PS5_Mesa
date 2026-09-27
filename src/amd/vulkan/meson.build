@@ -281,6 +281,15 @@ if radv_build_id != ''
   radv_flags += '-DRADV_BUILD_ID_OVERRIDE="' + radv_build_id + '"'
 endif
 
+# The PS5 RADV runs the geometry shaders NGG cannot as compute, with poly
+# (docs/RADV_GS_COMPUTE.md in PS5_Vulkan).
+radv_link_with = []
+if with_radv_ps5
+  radv_deps += idep_libpoly
+  radv_link_with += libpoly_nir
+  radv_flags += '-DRADV_GS_COMPUTE=1'
+endif
+
 radv_u_trace = get_option('radv-u_trace')
 if radv_u_trace
   radv_flags += '-DRADV_U_TRACE=1'
@@ -292,7 +301,7 @@ _radv_target = {
     inc_util, inc_virtio_gpu
   ],
   'link_with' : [
-    libamd_common, libamd_common_llvm, libamdgpu_addrlib,
+    libamd_common, libamd_common_llvm, libamdgpu_addrlib, radv_link_with,
   ],
   'dependencies' : [
     dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
