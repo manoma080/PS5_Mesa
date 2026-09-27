@@ -1512,7 +1512,8 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
             replay_address = *((const uint64_t *)opaque_info->pData->address);
       }
 
-      image->alignment = MAX2(image->alignment, 4096);
+      /* Memory is bound to a sparse image a GPU page at a time at least. */
+      image->alignment = MAX2(image->alignment, pdev->info.gart_page_size);
       image->size = align64(image->size, image->alignment);
 
       result = radv_bo_create(device, &image->vk.base, image->size, image->alignment, 0, flags,
