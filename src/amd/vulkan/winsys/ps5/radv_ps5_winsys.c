@@ -141,7 +141,12 @@ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs
  * compute units of 40) and the render-backend layout. Probe S3 measures them;
  * until then they only size scratch and a few hardware limits. */
 #define RADV_PS5_EXTERNAL_REV 0x28 /* the NAVI21 range: GFX10.3 */
-#define RADV_PS5_ADDRLIB_REV 0x03  /* the NAVI10 range: AddrLib's non-RB+ GFX10 swizzles */
+/* GFX1013's range: AddrLib's non-RB+ GFX10 swizzles, with the depth/stencil
+ * mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
+ * mips was laid out in three 64 KiB blocks, its 128x128 level in the mip
+ * tail, while the depth block wrote level 0 into a fourth (a write past the
+ * image: dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*). */
+#define RADV_PS5_ADDRLIB_REV 0x82
 #define RADV_PS5_GB_ADDR_CONFIG 0x00100044
 
 static void
