@@ -289,7 +289,29 @@ if with_radv_ps5
   radv_deps += declare_dependency(sources : [libpoly_shaders[1]])
   radv_link_with += libpoly_nir
   radv_flags += '-DRADV_GS_COMPUTE=1'
-  libradv_files += files('radv_gs_compute.c', 'radv_gs_compute.h')
+  libradv_files += files('radv_gs_compute.c', 'radv_gs_compute.h', 'radv_gs_compute_abi.h')
+
+  # RADV's own OpenCL helpers for them, NIR builder functions as poly's are.
+  # Without shader asserts: RADV gives these no printf buffer.
+  libradv_cl_spv = custom_target(
+    input : files('cl/radv_gs_compute.cl'),
+    output : 'libradv_cl.spv',
+    command : [
+      prog_mesa_clc, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@', '@INPUT@', '--',
+      '-I' + join_paths(meson.project_source_root(), 'include'),
+      '-I' + join_paths(meson.project_source_root(), 'src/compiler/libcl'),
+      '-I' + join_paths(meson.project_source_root(), 'src'),
+      '-I' + meson.current_source_dir(),
+      cl_args, '-DNDEBUG',
+    ],
+    depfile : 'libradv_cl.spv.d',
+  )
+  libradv_cl = custom_target(
+    input : libradv_cl_spv,
+    output : ['libradv_cl.cpp', 'libradv_cl.h'],
+    command : [prog_vtn_bindgen2, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'],
+  )
+  libradv_files += libradv_cl
 endif
 
 radv_u_trace = get_option('radv-u_trace')

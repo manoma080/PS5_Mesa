@@ -359,6 +359,9 @@ struct radv_cmd_state {
    uint64_t dirty;
    uint64_t dirty_dynamic;
 
+   /* Whether this recording has set up gs_compute_heap. */
+   bool gs_compute_heap_ready;
+
    VkShaderStageFlags active_stages;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
    struct radv_shader_object *shader_objs[MESA_VULKAN_SHADER_STAGES];
@@ -559,6 +562,9 @@ struct radv_cmd_buffer {
 
    struct radeon_winsys_bo *gfx9_fence_bo_tmz;
    struct radeon_winsys_bo *gfx9_eop_bug_bo_tmz;
+   /* The GPU heap of geometry shader draws run as compute whose counts live
+    * in memory (radv_gs_compute_abi.h). */
+   struct radeon_winsys_bo *gs_compute_heap;
    uint64_t gfx9_fence_va;
    uint32_t gfx9_fence_idx;
    uint64_t gfx9_eop_bug_va;

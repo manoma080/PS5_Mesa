@@ -16,9 +16,14 @@
 #include "radv_shader_info.h"
 
 #include "ac_nir.h"
+#include "libradv_cl.h"
+#include "meta/radv_meta.h"
+#include "nir/radv_meta_nir.h"
 #include "poly/cl/libpoly.h"
 #include "poly/geometry.h"
+#include "radv_device.h"
 #include "util/u_debug.h"
+#include "vk_shader_module.h"
 
 bool
 radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const struct radv_graphics_state_key *gfx_state,
@@ -430,4 +435,61 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
    struct radv_shader_binary *binary = radv_shader_nir_to_asm(compiler_info, &stage, &nir, 1, NULL);
    radv_shader_dump_asm(compiler_info, debug, binary, &stage.info);
    return binary;
+}
+
+VkResult
+radv_gs_compute_get_meta_pipeline(struct radv_device *device, bool unroll, VkPipeline *pipeline_out,
+                                  VkPipelineLayout *layout_out)
+{
+   const enum radv_meta_object_key_type key =
+      unroll ? RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL : RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP;
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = sizeof(uint64_t),
+   };
+
+   VkResult result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key,
+                                                 sizeof(key), layout_out);
+   if (result != VK_SUCCESS)
+      return result;
+
+   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(&device->meta_state.device, &key, sizeof(key));
+   if (pipeline_from_cache != VK_NULL_HANDLE) {
+      *pipeline_out = pipeline_from_cache;
+      return VK_SUCCESS;
+   }
+
+   /* One invocation sets a draw up; the unroll is one wave (its ballots see
+    * the whole workgroup). The argument block's address is the push
+    * constant. */
+   nir_builder b =
+      radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, unroll ? "meta_gs_compute_unroll" : "meta_gs_compute_setup");
+   b.shader->info.workgroup_size[0] = unroll ? RADV_GS_COMPUTE_WAVE : 1;
+   nir_def *args = nir_pack_64_2x32(&b, nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8));
+   if (unroll)
+      radv_gs_compute_unroll(&b, args);
+   else
+      radv_gs_compute_setup(&b, args);
+
+   const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+      .requiredSubgroupSize = RADV_GS_COMPUTE_WAVE,
+   };
+   const VkComputePipelineCreateInfo pipeline_info = {
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage =
+         {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext = &subgroup_size,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = vk_shader_module_handle_from_nir(b.shader),
+            .pName = "main",
+         },
+      .layout = *layout_out,
+   };
+
+   result = vk_meta_create_compute_pipeline(&device->vk, &device->meta_state.device, &pipeline_info, &key, sizeof(key),
+                                            pipeline_out);
+   ralloc_free(b.shader);
+   return result;
 }

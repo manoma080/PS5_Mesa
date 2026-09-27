@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "poly/nir/poly_nir.h"
+#include "radv_gs_compute_abi.h"
 #include "radv_shader.h"
 #include "radv_shader_info.h"
 #include "sid.h"
@@ -40,23 +41,11 @@
  */
 
 struct radv_compiler_info;
+struct radv_device;
 struct radv_graphics_state_key;
 struct radv_shader_stage;
 struct radv_shader_binary;
 struct radv_shader_debug_info;
-
-struct radv_gs_compute_draw {
-   uint64_t vertex_params;   /* struct poly_vertex_params */
-   uint64_t geometry_params; /* struct poly_geometry_params */
-   uint64_t ro_sink;         /* where writes that must go nowhere go */
-   uint64_t flat_mask;       /* the fragment shader's flat inputs */
-   uint32_t input_topology;  /* enum mesa_prim of the draw */
-   uint32_t provoking_last;
-   uint32_t first_vertex;
-   uint32_t base_instance;
-   uint32_t draw_id;
-   uint32_t padding;
-};
 
 #define RADV_GS_COMPUTE_DRAW_OFFSET(field) ((unsigned)offsetof(struct radv_gs_compute_draw, field))
 
@@ -154,5 +143,12 @@ struct radv_shader_binary *radv_gs_compute_compile(const struct radv_compiler_in
                                                    const struct radv_shader_stage *vs_stage,
                                                    enum radv_gs_compute_kind kind, nir_shader *nir,
                                                    struct radv_shader_debug_info *debug);
+
+/* The meta compute pipeline setting up a draw whose counts live in memory
+ * (radv_gs_compute_setup), or unrolling its primitive restarts
+ * (radv_gs_compute_unroll); its push constant is the argument block's
+ * address. */
+VkResult radv_gs_compute_get_meta_pipeline(struct radv_device *device, bool unroll, VkPipeline *pipeline,
+                                           VkPipelineLayout *layout);
 
 #endif /* RADV_GS_COMPUTE_H */
