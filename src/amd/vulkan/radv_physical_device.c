@@ -264,6 +264,15 @@ radv_enable_rt(const struct radv_physical_device *pdev)
    return true;
 }
 
+/* Ray tracing pipelines call their shaders with a stack in scratch, which
+ * ACO's calling convention addresses with scratch_* instructions on GFX9+:
+ * where a shader cannot set FLAT_SCRATCH, only ray queries are reported. */
+bool
+radv_rt_pipelines_enabled(const struct radv_physical_device *pdev)
+{
+   return radv_enable_rt(pdev) && (pdev->info.gfx_level < GFX9 || pdev->info.compiler_info.has_flat_scratch);
+}
+
 bool
 radv_emulate_rt(const struct radv_physical_device *pdev)
 {
@@ -774,7 +783,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_push_descriptor = true,
       .KHR_ray_query = radv_enable_rt(pdev),
       .KHR_ray_tracing_maintenance1 = radv_enable_rt(pdev),
-      .KHR_ray_tracing_pipeline = radv_enable_rt(pdev),
+      .KHR_ray_tracing_pipeline = radv_rt_pipelines_enabled(pdev),
       .KHR_ray_tracing_position_fetch = radv_enable_rt(pdev),
       .KHR_relaxed_block_layout = true,
       .KHR_robustness2 = true,
@@ -913,7 +922,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
 #endif
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
-      .EXT_pipeline_library_group_handles = radv_enable_rt(pdev),
+      .EXT_pipeline_library_group_handles = radv_rt_pipelines_enabled(pdev),
       .EXT_pipeline_protected_access = radv_tmz_enabled(pdev),
       .EXT_pipeline_robustness = !pdev->use_llvm,
       .EXT_post_depth_coverage = pdev->info.gfx_level >= GFX10,
@@ -1335,18 +1344,18 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .rayQuery = true,
 
       /* VK_EXT_pipeline_library_group_handles */
-      .pipelineLibraryGroupHandles = true,
+      .pipelineLibraryGroupHandles = radv_rt_pipelines_enabled(pdev),
 
       /* VK_KHR_ray_tracing_pipeline */
-      .rayTracingPipeline = true,
-      .rayTracingPipelineShaderGroupHandleCaptureReplay = true,
+      .rayTracingPipeline = radv_rt_pipelines_enabled(pdev),
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev),
       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
-      .rayTracingPipelineTraceRaysIndirect = pdev->info.gfx_level >= GFX7,
-      .rayTraversalPrimitiveCulling = true,
+      .rayTracingPipelineTraceRaysIndirect = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
+      .rayTraversalPrimitiveCulling = radv_rt_pipelines_enabled(pdev),
 
       /* VK_KHR_ray_tracing_maintenance1 */
       .rayTracingMaintenance1 = true,
-      .rayTracingPipelineTraceRaysIndirect2 = radv_enable_rt(pdev) && pdev->info.gfx_level >= GFX7,
+      .rayTracingPipelineTraceRaysIndirect2 = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
 
       /* VK_KHR_ray_tracing_position_fetch */
       .rayTracingPositionFetch = true,
@@ -1793,7 +1802,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
    VkShaderStageFlags taskmesh_stages =
       radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
-   VkShaderStageFlags rt_stages = radv_enable_rt(pdev) ? RADV_RT_STAGE_BITS : 0;
+   VkShaderStageFlags rt_stages = radv_rt_pipelines_enabled(pdev) ? RADV_RT_STAGE_BITS : 0;
 
    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
    bool gfx11plus = pdev->info.gfx_level >= GFX11;

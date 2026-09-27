@@ -266,6 +266,8 @@ bool radv_host_image_copy_enabled(const struct radv_physical_device *pdev);
 
 bool radv_enable_rt(const struct radv_physical_device *pdev);
 
+bool radv_rt_pipelines_enabled(const struct radv_physical_device *pdev);
+
 bool radv_emulate_rt(const struct radv_physical_device *pdev);
 
 bool radv_use_bvh8(const struct radv_physical_device *pdev);
