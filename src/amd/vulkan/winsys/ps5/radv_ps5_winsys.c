@@ -355,7 +355,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * shader arenas) cannot count on. */
    info->has_replayable_va = true;
    info->has_replayable_va_32bit = false;
-   info->has_sparse_image_3d = false;
    info->has_vm_always_valid = true;
    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
     * made visible to the GPU is a probe still to run. */
