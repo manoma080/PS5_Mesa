@@ -1066,6 +1066,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
    info->has_legacy_gs = info->gfx_level < GFX11;
    info->has_gpu_written_ibs = true;
+   info->has_perf_counters = true;
    info->has_syncobj = true;
    info->has_fence_to_handle = true;
 
@@ -2066,6 +2067,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
    fprintf(f, "    has_legacy_gs = %i\n", info->has_legacy_gs);
    fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
+   fprintf(f, "    has_perf_counters = %i\n", info->has_perf_counters);
    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);

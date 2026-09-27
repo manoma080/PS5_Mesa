@@ -383,6 +383,9 @@ struct radeon_info {
    /* Whether the CP runs a command buffer the GPU wrote, chained with
     * INDIRECT_BUFFER: device-generated commands need it. */
    bool has_gpu_written_ibs;
+   /* Whether performance counters can be programmed with the GPU held at a
+    * stable power state: VK_KHR_performance_query needs both. */
+   bool has_perf_counters;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

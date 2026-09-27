@@ -244,6 +244,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
     * the command buffers device-generated commands write cannot run. */
    info->has_gpu_written_ibs = false;
+   /* No exported function holds the GPU at a stable power state
+    * (radv_ps5_ctx_set_pstate refuses every state but none), so the profiling
+    * lock VK_KHR_performance_query takes always failed
+    * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
+   info->has_perf_counters = false;
    info->rbplus_allowed = false;
    /* A depth-only image cleared to 0 read back 1 after a draw whose
     * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
