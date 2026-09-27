@@ -233,6 +233,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * same shaders through buffer instructions, as on GFX8, run (the smoke
     * title's scratch checks, graphicsfuzz's large private arrays). */
    info->compiler_info.has_flat_scratch = false;
+   /* Every acceleration structure build faulted the GPU (a write to an
+    * unmapped page far past every buffer the process had, even for an empty
+    * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
+    * and host builds are not offered, so no ray tracing is reported until the
+    * build runs. */
+   info->compiler_info.has_image_bvh_intersect_ray = false;
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
