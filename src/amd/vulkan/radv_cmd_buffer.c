@@ -6671,8 +6671,15 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
    uint32_t internal_stages = stages;
 
    switch (bind_point) {
-   case VK_PIPELINE_BIND_POINT_GRAPHICS:
+   case VK_PIPELINE_BIND_POINT_GRAPHICS: {
+      /* A geometry shader run as compute has no hardware stage: its
+       * rasterization copy, which runs the shader again, is the vertex stage's
+       * (the passes take their constants at each draw). */
+      const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
+      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && pipeline && pipeline->base.gs_compute)
+         internal_stages |= VK_SHADER_STAGE_VERTEX_BIT;
       break;
+   }
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       break;
    case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
