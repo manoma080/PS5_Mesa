@@ -361,6 +361,9 @@ struct radv_cmd_state {
 
    /* Whether this recording has set up gs_compute_heap. */
    bool gs_compute_heap_ready;
+   /* Whether the draw is a geometry shader's rasterization copy (its compute
+    * passes counted for the queries). */
+   bool gs_compute_rasterizing;
 
    VkShaderStageFlags active_stages;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
@@ -890,5 +893,9 @@ radv_resume_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
    cond_render->enabled = cond_render->enabled_save;
    cond_render->suspended = false;
 }
+
+/* The command buffer's memory counters (RADV_SHADER_QUERY_*) of what
+ * geometry shaders run as compute generate and write, which queries sample. */
+uint64_t radv_gs_compute_query_counters(struct radv_cmd_buffer *cmd_buffer);
 
 #endif /* RADV_CMD_BUFFER_H */

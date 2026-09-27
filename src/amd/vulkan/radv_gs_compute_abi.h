@@ -23,7 +23,7 @@ struct radv_gs_compute_draw {
    uint32_t first_vertex;
    uint32_t base_instance;
    uint32_t draw_id;
-   uint32_t padding;
+   uint32_t rasterization_stream;
 } PACKED;
 static_assert(sizeof(struct radv_gs_compute_draw) == 14 * 4, "struct radv_gs_compute_draw must be 14 words");
 

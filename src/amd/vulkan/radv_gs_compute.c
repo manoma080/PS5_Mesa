@@ -39,7 +39,9 @@ radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const str
    if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir || gfx_state->vs.has_prolog)
       return false;
 
-   return debug_get_bool_option("RADV_PS5_GS_COMPUTE", false);
+   /* Transform feedback from a geometry shader, which NGG cannot capture here
+    * (radv_gs_compute.h); every geometry shader when forced for testing. */
+   return gs->xfb_info || debug_get_bool_option("RADV_PS5_GS_COMPUTE", false);
 }
 
 /* The vertex shader's outputs go to memory, indexed by the invocation's place
@@ -175,6 +177,11 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
          continue;
       NIR_PASS(_, lowered[i], nir_lower_global_vars_to_local);
       NIR_PASS(_, lowered[i], nir_lower_vars_to_ssa);
+
+      /* poly wrote the transform feedback: none of these captures any in
+       * hardware. */
+      lowered[i]->xfb_info = NULL;
+      lowered[i]->info.has_transform_feedback_varyings = false;
    }
 
    /* The rasterization copy reads the vertex ID RADV lowers right after
@@ -286,6 +293,9 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       break;
    case nir_intrinsic_load_input_topology_poly:
       value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(input_topology), 1);
+      break;
+   case nir_intrinsic_load_rasterization_stream:
+      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(rasterization_stream), 1);
       break;
    case nir_intrinsic_load_provoking_last:
       value = nir_b2b32(b, nir_ine_imm(b, load_draw(b, compiler_info, args,
@@ -438,11 +448,20 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
 }
 
 VkResult
-radv_gs_compute_get_meta_pipeline(struct radv_device *device, bool unroll, VkPipeline *pipeline_out,
-                                  VkPipelineLayout *layout_out)
+radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,
+                                  VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
 {
-   const enum radv_meta_object_key_type key =
-      unroll ? RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL : RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP;
+   static const enum radv_meta_object_key_type keys[] = {
+      [RADV_GS_COMPUTE_META_SETUP] = RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP,
+      [RADV_GS_COMPUTE_META_UNROLL] = RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL,
+      [RADV_GS_COMPUTE_META_PREFIX_SUM] = RADV_META_OBJECT_KEY_GS_COMPUTE_PREFIX_SUM,
+   };
+   static const char *const names[] = {
+      [RADV_GS_COMPUTE_META_SETUP] = "meta_gs_compute_setup",
+      [RADV_GS_COMPUTE_META_UNROLL] = "meta_gs_compute_unroll",
+      [RADV_GS_COMPUTE_META_PREFIX_SUM] = "meta_gs_compute_prefix_sum",
+   };
+   const enum radv_meta_object_key_type key = keys[meta];
    const VkPushConstantRange pc_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       .size = sizeof(uint64_t),
@@ -459,17 +478,24 @@ radv_gs_compute_get_meta_pipeline(struct radv_device *device, bool unroll, VkPip
       return VK_SUCCESS;
    }
 
-   /* One invocation sets a draw up; the unroll is one wave (its ballots see
-    * the whole workgroup). The argument block's address is the push
-    * constant. */
-   nir_builder b =
-      radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, unroll ? "meta_gs_compute_unroll" : "meta_gs_compute_setup");
-   b.shader->info.workgroup_size[0] = unroll ? RADV_GS_COMPUTE_WAVE : 1;
+   /* One invocation sets a draw up; the unroll and each word's prefix sum are
+    * one wave (their ballots and scans see the whole workgroup). The push
+    * constant is the address of the argument block, or of the geometry
+    * parameters for the prefix sum. */
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "%s", names[meta]);
+   b.shader->info.workgroup_size[0] = meta == RADV_GS_COMPUTE_META_SETUP ? 1 : RADV_GS_COMPUTE_WAVE;
    nir_def *args = nir_pack_64_2x32(&b, nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8));
-   if (unroll)
-      radv_gs_compute_unroll(&b, args);
-   else
+   switch (meta) {
+   case RADV_GS_COMPUTE_META_SETUP:
       radv_gs_compute_setup(&b, args);
+      break;
+   case RADV_GS_COMPUTE_META_UNROLL:
+      radv_gs_compute_unroll(&b, args);
+      break;
+   case RADV_GS_COMPUTE_META_PREFIX_SUM:
+      radv_gs_compute_prefix_sum(&b, args);
+      break;
+   }
 
    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,

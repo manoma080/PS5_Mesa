@@ -25,6 +25,10 @@ struct radv_query_pool {
    uint64_t size;
    char *ptr;
    bool uses_emulated_queries;
+   /* Primitives generated and transform feedback queries also sample the
+    * memory counters of geometry shaders run as compute
+    * (radv_gs_compute_query_counters), in RADV_QUERY_GS_COMPUTE_* slots. */
+   bool gs_compute_counts;
    bool uses_ace;              /* For task shader invocations on GFX10.3+ */
    bool uses_shader_query_buf; /* For generated/written primitives on GFX12+ */
 };

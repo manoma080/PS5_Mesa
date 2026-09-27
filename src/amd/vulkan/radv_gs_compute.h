@@ -144,11 +144,17 @@ struct radv_shader_binary *radv_gs_compute_compile(const struct radv_compiler_in
                                                    enum radv_gs_compute_kind kind, nir_shader *nir,
                                                    struct radv_shader_debug_info *debug);
 
-/* The meta compute pipeline setting up a draw whose counts live in memory
- * (radv_gs_compute_setup), or unrolling its primitive restarts
- * (radv_gs_compute_unroll); its push constant is the argument block's
- * address. */
-VkResult radv_gs_compute_get_meta_pipeline(struct radv_device *device, bool unroll, VkPipeline *pipeline,
-                                           VkPipelineLayout *layout);
+/* The meta compute passes of a draw (cl/radv_gs_compute.cl): setting up one
+ * whose counts live in memory, unrolling its primitive restarts, and the
+ * prefix sum of its counts for transform feedback. Each one's push constant
+ * is the address of its argument block, or of the geometry parameters. */
+enum radv_gs_compute_meta {
+   RADV_GS_COMPUTE_META_SETUP,
+   RADV_GS_COMPUTE_META_UNROLL,
+   RADV_GS_COMPUTE_META_PREFIX_SUM,
+};
+
+VkResult radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,
+                                           VkPipeline *pipeline, VkPipelineLayout *layout);
 
 #endif /* RADV_GS_COMPUTE_H */

@@ -189,3 +189,25 @@ radv_gs_compute_unroll(global struct radv_gs_compute_unroll *u)
    if (tid == 0)
       out_draw[0] = out_prims * per_prim;
 }
+
+/* The inclusive prefix sum of one word of the count buffer across the draw's
+ * input primitives, for their places in the transform feedback buffers: one
+ * workgroup of one wave per word. */
+void
+radv_gs_compute_prefix_sum(global struct poly_geometry_params *p)
+{
+   const uint word = cl_group_id.x;
+   const uint words = p->count_buffer_stride / 4;
+   const uint len = p->input_primitives;
+   global uint *counts = p->count_buffer;
+
+   uint carry = 0;
+   for (uint base = 0; base < len; base += RADV_GS_COMPUTE_WAVE) {
+      const uint i = base + cl_local_id.x;
+      const uint x = i < len ? counts[i * words + word] : 0;
+      const uint sum = sub_group_scan_inclusive_add(x) + carry;
+      if (i < len)
+         counts[i * words + word] = sum;
+      carry = sub_group_broadcast(sum, RADV_GS_COMPUTE_WAVE - 1);
+   }
+}

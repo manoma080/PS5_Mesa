@@ -12241,6 +12241,11 @@ radv_get_ngg_state_query(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    enum radv_shader_query_state shader_query_state = radv_shader_query_none;
 
+   /* The rasterization copy of a geometry shader run as compute counts nothing:
+    * its passes did. */
+   if (cmd_buffer->state.gs_compute_rasterizing)
+      return shader_query_state;
+
    /* By default shader queries are disabled but they are enabled if the command buffer has active GDS
     * queries or if it's a secondary command buffer that inherits the number of generated
     * primitives.
@@ -14016,6 +14021,9 @@ radv_after_draw(struct radv_cmd_buffer *cmd_buffer)
 
 static void radv_emit_dispatch_packets(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *compute_shader,
                                        const struct radv_dispatch_info *info);
+static void radv_flush_vgt_streamout(struct radv_cmd_buffer *cmd_buffer);
+static void radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compute_meta meta,
+                                      uint64_t args_va, uint32_t x);
 
 #define RADV_GS_COMPUTE_HEAP_SIZE   (64u << 20)
 #define RADV_GS_COMPUTE_HEAP_HEADER 256u
@@ -14035,6 +14043,17 @@ radv_gs_compute_upload(struct radv_cmd_buffer *cmd_buffer, unsigned size, const 
    if (ptr)
       *ptr = map;
    return radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
+}
+
+uint64_t
+radv_gs_compute_query_counters(struct radv_cmd_buffer *cmd_buffer)
+{
+   if (!cmd_buffer->state.shader_query_buf_va) {
+      void *ptr;
+      const uint64_t va = radv_gs_compute_upload(cmd_buffer, RADV_SHADER_QUERY_BUF_SIZE, NULL, &ptr);
+      cmd_buffer->state.shader_query_buf_va = va;
+   }
+   return cmd_buffer->state.shader_query_buf_va;
 }
 
 /* The command buffer's heap, its header (struct poly_heap) first. Each
@@ -14137,30 +14156,42 @@ radv_gs_compute_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_s
       RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
 }
 
-/* poly's parameters and the draw block, as far as the CPU knows them. */
-static void
+/* poly's parameters and the draw block, as far as the CPU knows them. With
+ * transform feedback active, returns where the buffers' offsets go for the
+ * passes (radv_gs_compute_run_passes), else 0. */
+static uint64_t
 radv_gs_compute_prepare(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
                         enum mesa_prim mode, struct poly_vertex_params *vp, struct poly_geometry_params *gp,
                         struct radv_gs_compute_draw *block)
 {
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
    const uint32_t wg_size[3] = {RADV_GS_COMPUTE_WAVE, 1, 1};
 
    poly_vertex_params_init(vp, gsc->vs_outputs, wg_size);
    poly_geometry_params_init(gp, mode, wg_size);
 
+   /* Primitives generated and written per stream count into the command
+    * buffer's counters, which queries sample. */
    const uint64_t sink = radv_gs_compute_upload(cmd_buffer, 256, NULL, NULL);
+   const uint64_t counters = radv_gs_compute_query_counters(cmd_buffer);
    for (unsigned i = 0; i < POLY_MAX_VERTEX_STREAMS; i++) {
-      gp->prims_generated_counter[i] = sink;
-      gp->xfb_prims_generated_counter[i] = sink;
+      gp->prims_generated_counter[i] = counters ? counters + RADV_SHADER_QUERY_PRIM_GEN_OFFSET(i) : sink;
+      gp->xfb_prims_generated_counter[i] = counters ? counters + RADV_SHADER_QUERY_PRIM_XFB_OFFSET(i) : sink;
       gp->xfb_overflow[i] = sink;
    }
    gp->xfb_any_overflow = sink;
+
+   /* Transform feedback goes to the bound buffers from the offsets the
+    * hardware holds (radv_gs_compute_save_streamout); without it, nowhere. */
+   const bool xfb = gsc->info.xfb && so->streamout_enabled && so->enabled_mask;
+   const uint64_t offsets = radv_gs_compute_upload(cmd_buffer, 4 * POLY_MAX_SO_BUFFERS, NULL, NULL);
    for (unsigned i = 0; i < POLY_MAX_SO_BUFFERS; i++) {
-      gp->xfb_offs_ptrs[i] = sink;
-      gp->xfb_base_original[i] = sink;
-      gp->xfb_base[i] = sink;
-      gp->xfb_size[i] = 0;
+      const bool bound = xfb && (so->enabled_mask & BITFIELD_BIT(i));
+      gp->xfb_offs_ptrs[i] = offsets + 4 * i;
+      gp->xfb_base_original[i] = bound ? so->bindings[i].va : sink;
+      gp->xfb_base[i] = gp->xfb_base_original[i];
+      gp->xfb_size[i] = bound ? MIN2(so->bindings[i].size, UINT32_MAX) : 0;
    }
    gp->count_buffer_stride = gsc->info.count_words * 4;
 
@@ -14168,25 +14199,97 @@ radv_gs_compute_prepare(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs
       .ro_sink = sink,
       .input_topology = mode,
       .provoking_last = d->vk.rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
+      .rasterization_stream = d->vk.rs.rasterization_stream,
    };
+   return xfb ? offsets : 0;
 }
 
-/* The vertex shader, the count pass and the geometry shader proper, sized
- * by the CPU or by the setup pass at setup_va. */
+/* Transform feedback of a geometry shader run as compute continues from the
+ * offsets hardware streamout holds: they go to memory for the passes, which
+ * advance them, and back before the next draw. */
+static void
+radv_gs_compute_save_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t offsets_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   radv_flush_vgt_streamout(cmd_buffer);
+
+   radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 6);
+   radeon_begin(cs);
+   u_foreach_bit (i, so->enabled_mask) {
+      radeon_emit(PKT3(PKT3_STRMOUT_BUFFER_UPDATE, 4, 0));
+      radeon_emit(STRMOUT_SELECT_BUFFER(i) | STRMOUT_DATA_TYPE(1) | /* offset in bytes */
+                  STRMOUT_OFFSET_SOURCE(STRMOUT_OFFSET_NONE) | STRMOUT_STORE_BUFFER_FILLED_SIZE);
+      radeon_emit(offsets_va + 4 * i);
+      radeon_emit((offsets_va + 4 * i) >> 32);
+      radeon_emit(0);
+      radeon_emit(0);
+   }
+   radeon_end();
+
+   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
+}
+
+static void
+radv_gs_compute_restore_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t offsets_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   /* The passes are done with the offsets, and the prefetch parser waits. */
+   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
+   radv_emit_cache_flush(cmd_buffer);
+
+   radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 6);
+   radeon_begin(cs);
+   u_foreach_bit (i, so->enabled_mask) {
+      radeon_emit(PKT3(PKT3_STRMOUT_BUFFER_UPDATE, 4, 0));
+      radeon_emit(STRMOUT_SELECT_BUFFER(i) | STRMOUT_DATA_TYPE(1) | /* offset in bytes */
+                  STRMOUT_OFFSET_SOURCE(STRMOUT_OFFSET_FROM_MEM));
+      radeon_emit(0);
+      radeon_emit(0);
+      radeon_emit(offsets_va + 4 * i);
+      radeon_emit((offsets_va + 4 * i) >> 32);
+   }
+   radeon_end();
+}
+
+/* The vertex shader, the count pass, the prefix sum of the counts, the
+ * pre-GS setup and the geometry shader proper, sized by the CPU or by the
+ * setup pass at setup_va. xfb_offsets_va holds the transform feedback
+ * offsets while they run, if transform feedback is active. */
 static void
 radv_gs_compute_run_passes(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
-                           uint64_t draw_va, uint32_t vertices, uint32_t prims, uint32_t instances, uint64_t setup_va)
+                           uint64_t draw_va, uint64_t gp_va, uint32_t vertices, uint32_t prims, uint32_t instances,
+                           uint64_t setup_va, uint64_t xfb_offsets_va)
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
    const uint64_t vs_groups = setup_va ? setup_va + offsetof(struct radv_gs_compute_setup, vs_groups) : 0;
    const uint64_t gs_groups = setup_va ? setup_va + offsetof(struct radv_gs_compute_setup, gs_groups) : 0;
 
+   if (xfb_offsets_va)
+      radv_gs_compute_save_streamout(cmd_buffer, xfb_offsets_va);
+
    radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)], draw_va, vertices,
                             instances, vs_groups);
    radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)], draw_va, prims,
                             instances, gs_groups);
+   if (gsc->info.prefix_sum) {
+      radv_meta_begin(cmd_buffer);
+      radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
+      radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_PREFIX_SUM, gp_va,
+                                gsc->info.count_words * RADV_GS_COMPUTE_WAVE);
+      radv_meta_end(cmd_buffer);
+   }
+   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)], draw_va, 1, 1, 0);
    radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)], draw_va, prims,
                             instances, gs_groups);
+
+   if (xfb_offsets_va)
+      radv_gs_compute_restore_streamout(cmd_buffer, xfb_offsets_va);
 
    /* The application's compute state comes back before its next dispatch. */
    state->dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
@@ -14226,6 +14329,13 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       state->dirty |= RADV_CMD_DIRTY_INDEX_BUFFER;
    }
 
+   /* Neither hardware streamout nor the NGG shader's query counting sees the
+    * rasterization copy: the passes wrote and counted. */
+   const bool saved_suspended = state->streamout.suspended;
+   state->streamout.suspended = true;
+   state->gs_compute_rasterizing = true;
+   state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
+
    const struct radv_draw_info rast = {
       .count = direct ? direct->index_count : 1,
       .instance_count = direct ? direct->instance_count : 0,
@@ -14248,6 +14358,9 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       radv_after_draw(cmd_buffer);
    }
 
+   state->streamout.suspended = saved_suspended;
+   state->gs_compute_rasterizing = false;
+   state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
    d->vk.ia.primitive_topology = saved_topology;
    d->vk.ia.primitive_restart_enable = saved_restart;
    state->primitive_restart_index = saved_restart_index;
@@ -14257,15 +14370,16 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    state->last_index_type = -1;
 }
 
-/* One meta pass of the GPU setup over the argument block at args_va. */
+/* One meta pass over the argument block at args_va, of x invocations. */
 static void
-radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, bool unroll, uint64_t args_va)
+radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compute_meta meta, uint64_t args_va,
+                          uint32_t x)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipelineLayout layout;
    VkPipeline pipeline;
 
-   VkResult result = radv_gs_compute_get_meta_pipeline(device, unroll, &pipeline, &layout);
+   VkResult result = radv_gs_compute_get_meta_pipeline(device, meta, &pipeline, &layout);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, result);
       return;
@@ -14273,7 +14387,7 @@ radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, bool unroll, uint6
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args_va), &args_va);
-   radv_unaligned_dispatch(cmd_buffer, unroll ? RADV_GS_COMPUTE_WAVE : 1, 1, 1);
+   radv_unaligned_dispatch(cmd_buffer, x, 1, 1);
 
    /* The passes after it read what it wrote, the command processor too. */
    cmd_buffer->state.flush_bits |=
@@ -14332,7 +14446,8 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
          .prim = mode,
          .draw_index = draw_index,
       };
-      radv_gs_compute_meta_pass(cmd_buffer, true, radv_gs_compute_upload(cmd_buffer, sizeof(unroll), &unroll, NULL));
+      radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_UNROLL,
+                                radv_gs_compute_upload(cmd_buffer, sizeof(unroll), &unroll, NULL), RADV_GS_COMPUTE_WAVE);
 
       draw_va = unroll.out_draw;
       draw_count_va = 0;
@@ -14341,7 +14456,7 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
       mode = u_decomposed_prim(mode);
    }
 
-   radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
+   const uint64_t xfb_offsets_va = radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
    const uint64_t gp_va = radv_gs_compute_upload(cmd_buffer, sizeof(gp), &gp, NULL);
    block.vertex_params = radv_gs_compute_upload(cmd_buffer, sizeof(vp), &vp, NULL);
    block.geometry_params = gp_va;
@@ -14366,11 +14481,11 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
       .max_indices = gsc->info.max_indices,
    };
    const uint64_t setup_va = radv_gs_compute_upload(cmd_buffer, sizeof(setup), &setup, NULL);
-   radv_gs_compute_meta_pass(cmd_buffer, false, setup_va);
+   radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_SETUP, setup_va, 1);
 
    radv_meta_end(cmd_buffer);
 
-   radv_gs_compute_run_passes(cmd_buffer, gsc, block_va, 0, 0, 0, setup_va);
+   radv_gs_compute_run_passes(cmd_buffer, gsc, block_va, gp_va, 0, 0, 0, setup_va, xfb_offsets_va);
 
    uint64_t rast_index_va = 0;
    uint32_t rast_max_index_count = 0;
@@ -14421,7 +14536,7 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
    struct poly_vertex_params vp;
    struct poly_geometry_params gp;
    struct radv_gs_compute_draw block;
-   radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
+   const uint64_t xfb_offsets_va = radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
 
    /* The vertex stream, and where the vertex shader's outputs go. */
    poly_vertex_params_set_draw(&vp, info->count, info->instance_count);
@@ -14459,7 +14574,8 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
    const uint64_t draw_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
 
    const struct poly_indirect_draw rast = gp.draw;
-   radv_gs_compute_run_passes(cmd_buffer, gsc, draw_va, info->count, gp.grid[0], info->instance_count, 0);
+   radv_gs_compute_run_passes(cmd_buffer, gsc, draw_va, block.geometry_params, info->count, gp.grid[0],
+                              info->instance_count, 0, xfb_offsets_va);
    radv_gs_compute_rasterize(cmd_buffer, gsc, draw_va, rast_index_va, rast.index_count, &rast, 0);
    return true;
 }
