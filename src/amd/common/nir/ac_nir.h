@@ -103,6 +103,8 @@ typedef struct {
    unsigned workgroup_size;
    bool use_llvm;
    bool load_grid_size_from_user_sgpr;
+   /* A GFX10.3+ compute wave's TG_SIZE has no wave ID (ac_compiler_info.has_cs_wave_id). */
+   bool no_cs_wave_id;
 } ac_nir_lower_intrinsics_to_args_options;
 
 bool ac_nir_lower_intrinsics_to_args(nir_shader *shader, const struct ac_shader_args *ac_args,

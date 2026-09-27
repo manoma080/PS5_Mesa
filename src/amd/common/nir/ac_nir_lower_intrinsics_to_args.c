@@ -52,11 +52,11 @@ load_subgroup_id_lowered(lower_intrinsics_to_args_state *s, nir_builder *b)
          assert(!s->options->use_llvm);
          nir_def *ttmp8 = nir_load_ttmp_register_wg_div_amd(b, .base = 8);
          return nir_ubfe_imm(b, ttmp8, 25, 5);
-      } else if (s->options->gfx_level >= GFX10_3) {
+      } else if (s->options->gfx_level >= GFX10_3 && !s->options->no_cs_wave_id) {
          assert(s->args->tg_size.used);
          return ac_nir_unpack_arg_wg_div(b, s->args, s->args->tg_size, 20, 5);
       } else {
-         /* GFX6-10 don't actually support a wave id, but we can
+         /* GFX6-10 (and GFX10.3 GPUs without it) don't actually support a wave id, but we can
           * use the ordered id because ORDERED_APPEND_* is set to
           * zero in the compute dispatch initiator.
           */

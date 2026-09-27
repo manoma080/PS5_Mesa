@@ -238,6 +238,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * same shaders through buffer instructions, as on GFX8, run (the smoke
     * title's scratch checks, graphicsfuzz's large private arrays). */
    info->compiler_info.has_flat_scratch = false;
+   /* A 128-invocation workgroup of wave64 reported one subgroup where two ran
+    * (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size): TG_SIZE's
+    * GFX10.3 wave ID (bits 20-24) reads 0, as on GFX10.1, whose ordered wave
+    * ID serves instead. */
+   info->compiler_info.has_cs_wave_id = false;
    /* Every acceleration structure build faulted the GPU (a write to an
     * unmapped page far past every buffer the process had, even for an empty
     * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),

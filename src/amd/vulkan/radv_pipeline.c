@@ -518,6 +518,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          .workgroup_size = stage->info.workgroup_size,
          .use_llvm = use_llvm,
          .load_grid_size_from_user_sgpr = compiler_info->key.load_grid_size_from_user_sgpr,
+         .no_cs_wave_id = !compiler_info->ac->has_cs_wave_id,
       });
    NIR_PASS(_, stage->nir, radv_nir_lower_abi, gfx_level, stage, gfx_state, compiler_info->hw.address32_hi);
 

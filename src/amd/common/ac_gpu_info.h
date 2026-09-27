@@ -131,6 +131,9 @@ struct ac_compiler_info {
     * which GFX9-GFX10.3 scratch instructions need; without it, scratch goes
     * through buffer instructions, as on GFX8. */
    uint32_t has_flat_scratch : 1;
+   /* Whether a compute wave finds its index in the workgroup in TG_SIZE's bits
+    * 20-24 (GFX10.3+); without it the ordered wave ID (bits 6-11) serves. */
+   uint32_t has_cs_wave_id : 1;
    uint32_t has_fast_fma32 : 1;
    /* Whether chips support fused v_fma_mix* instructions.
     * Otherwise, unfused v_mad_mix* is available on GFX9.
@@ -210,7 +213,7 @@ struct ac_compiler_info {
    uint32_t has_smem_with_null_prt_bug : 1;
    uint32_t has_desc_resource_level : 1;
 
-   uint32_t reserved : 2;
+   uint32_t reserved : 1;
 };
 
 struct radeon_info {
