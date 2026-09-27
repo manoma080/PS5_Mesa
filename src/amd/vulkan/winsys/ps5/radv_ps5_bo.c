@@ -41,7 +41,8 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
       struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
       if (!bo)
          return VK_ERROR_OUT_OF_HOST_MEMORY;
-      if (!radv_ps5_vrange_reserve(size, (flags & RADEON_FLAG_REPLAYABLE) || replay_address, replay_address,
+      if (!radv_ps5_vrange_reserve(size, flags & RADEON_FLAG_32BIT,
+                                   (flags & RADEON_FLAG_REPLAYABLE) || replay_address, replay_address,
                                    &bo->memory)) {
          free(bo);
          return replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;

@@ -455,10 +455,34 @@ radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *mem
    return radv_ps5_map_fixed(at, bytes, memory->physical + (int64_t)offset);
 }
 
+/* A range in the window: a reservation where the kernel puts one it is given
+ * no address for, or at the captured address if nothing took it since, as
+ * window buffers are placed (radv_ps5_memory_alloc). */
+static bool
+radv_ps5_vrange_reserve_window(uint64_t bytes, uint64_t replay_va, struct radv_ps5_memory *out)
+{
+   const uint64_t span = align64(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
+   if (replay_va && (replay_va % RADV_PS5_LARGE_BYTES || !radv_ps5_window_contains(replay_va, span)))
+      return false;
+   void *at = (void *)(uintptr_t)replay_va;
+   if (sceKernelReserveVirtualRange(&at, span, 0, RADV_PS5_LARGE_BYTES) != 0)
+      return false;
+   if ((replay_va && at != (void *)(uintptr_t)replay_va) || !radv_ps5_window_contains((uint64_t)(uintptr_t)at, span) ||
+       !radv_ps5_vrange_unbind(at, span)) {
+      sceKernelMunmap(at, span);
+      return false;
+   }
+   *out = (struct radv_ps5_memory){.cpu = at, .bytes = span, .physical = -1};
+   return true;
+}
+
 bool
-radv_ps5_vrange_reserve(uint64_t bytes, bool replayable, uint64_t replay_va, struct radv_ps5_memory *out)
+radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
+                        struct radv_ps5_memory *out)
 {
    *out = (struct radv_ps5_memory){.physical = -1};
+   if (window32)
+      return radv_ps5_vrange_reserve_window(bytes, replay_va, out);
    const uint32_t granules = (uint32_t)DIV_ROUND_UP(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
    /* Placed as radv_ps5_memory_alloc_replayable places buffers. */
    uint32_t granule;
@@ -695,11 +719,12 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
 /* Sparse ranges in the model: plain memory, which binds leave alone (the
  * model runs no GPU work to read through them). */
 bool
-radv_ps5_vrange_reserve(uint64_t bytes, bool replayable, uint64_t replay_va, struct radv_ps5_memory *out)
+radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
+                        struct radv_ps5_memory *out)
 {
    const uint64_t span = align64(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
-   return replayable ? radv_ps5_memory_alloc_replayable(span, RADV_PS5_LARGE_BYTES, false, replay_va, out)
-                     : radv_ps5_memory_alloc(span, RADV_PS5_LARGE_BYTES, false, out);
+   return replayable ? radv_ps5_memory_alloc_replayable(span, RADV_PS5_LARGE_BYTES, window32, replay_va, out)
+                     : radv_ps5_memory_alloc(span, RADV_PS5_LARGE_BYTES, window32, out);
 }
 
 void

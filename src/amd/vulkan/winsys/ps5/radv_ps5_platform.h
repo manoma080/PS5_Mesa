@@ -66,12 +66,14 @@ void radv_ps5_memory_free(struct radv_ps5_memory *memory);
 bool radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
                                       struct radv_ps5_memory *out);
 
-/* Sparse resources: a range reserved in the device-memory region, unbound
- * (the shared zero block) until pieces of a buffer's memory are bound into
- * it. Addresses, sizes and offsets are whole pages. */
+/* Sparse resources: a range reserved in the device-memory region, or in the
+ * window for one the shaders reach through a 32-bit pointer (a descriptor
+ * buffer), unbound (the shared zero block) until pieces of a buffer's memory
+ * are bound into it. Addresses, sizes and offsets are whole pages. */
 /* Placed for capture and replay as radv_ps5_memory_alloc_replayable places
  * buffers when replayable or replay_va is set. */
-bool radv_ps5_vrange_reserve(uint64_t bytes, bool replayable, uint64_t replay_va, struct radv_ps5_memory *out);
+bool radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
+                             struct radv_ps5_memory *out);
 void radv_ps5_vrange_release(struct radv_ps5_memory *range);
 bool radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset);
 bool radv_ps5_vrange_unbind(void *at, uint64_t bytes);
