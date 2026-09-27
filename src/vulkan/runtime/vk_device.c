@@ -877,12 +877,14 @@ vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
       clockid = CLOCK_MONOTONIC;
       break;
    case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
-      /* The "RAW" clocks on Linux are called "FAST" on FreeBSD */
+      /* The domain is defined as clock_gettime(CLOCK_MONOTONIC_RAW). FreeBSD's
+       * CLOCK_MONOTONIC_FAST is not that clock but CLOCK_MONOTONIC at tick
+       * granularity, which reads behind a precise reading taken before it (a
+       * FreeBSD-based console: dEQP-VK.pipeline.*.timestamp.calibrated.
+       * host_domain_test), so without CLOCK_MONOTONIC_RAW the domain is not
+       * offered. */
 #if defined(CLOCK_MONOTONIC_RAW)
       clockid = CLOCK_MONOTONIC_RAW;
-      break;
-#elif defined(CLOCK_MONOTONIC_FAST)
-      clockid = CLOCK_MONOTONIC_FAST;
       break;
 #else
       FALLTHROUGH;
