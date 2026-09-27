@@ -76,6 +76,16 @@ struct gfx10_ngg_info {
    bool max_vert_out_per_gs_instance;
 };
 
+/* Which part of a geometry shader run as compute a shader is (radv_gs_compute.h). */
+enum radv_gs_compute_kind {
+   RADV_GS_COMPUTE_NONE = 0,
+   RADV_GS_COMPUTE_VS,     /* the vertex shader, outputs to memory */
+   RADV_GS_COMPUTE_COUNT,  /* per-primitive output counts; the GS's memory writes */
+   RADV_GS_COMPUTE_PRE_GS, /* transform feedback and query setup */
+   RADV_GS_COMPUTE_MAIN,   /* transform feedback and the rasterized index buffer */
+   RADV_GS_COMPUTE_RAST,   /* the hardware vertex shader drawing the GS output */
+};
+
 struct radv_shader_info {
    uint32_t workgroup_size;
    uint32_t nir_shared_size;
@@ -92,6 +102,9 @@ struct radv_shader_info {
    struct radv_vs_output_info outinfo;
 
    uint8_t wave_size;
+   /* enum radv_gs_compute_kind: which part of a geometry shader run as
+    * compute this is (radv_gs_compute.h), or none. */
+   uint8_t gs_compute;
    uint8_t ngg_lds_scratch_size;
    mesa_shader_stage stage : 8;
    mesa_shader_stage next_stage : 8;

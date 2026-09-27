@@ -38,6 +38,7 @@ enum radv_ud_index {
    AC_UD_VS_VERTEX_BUFFERS = AC_UD_SHADER_START,
    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
    AC_UD_VS_PROLOG_INPUTS,
+   AC_UD_VS_GS_COMPUTE_DRAW, /* radv_gs_compute.h: the rasterization VS's draw block */
    AC_UD_VS_MAX_UD,
    AC_UD_PS_STATE,
    AC_UD_PS_MAX_UD,
@@ -49,6 +50,8 @@ enum radv_ud_index {
    AC_UD_CS_TASK_RING_OFFSETS,
    AC_UD_CS_TASK_DRAW_ID,
    AC_UD_CS_TASK_IB,
+   AC_UD_CS_GS_COMPUTE_DRAW,           /* radv_gs_compute.h: the draw block */
+   AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS, /* and the vertex shader's vertex buffers */
    AC_UD_CS_MAX_UD,
    AC_UD_GS_MAX_UD,
    AC_UD_TCS_OFFCHIP_LAYOUT = AC_UD_VS_MAX_UD,
@@ -75,6 +78,9 @@ struct radv_userdata_locations {
 
 struct radv_shader_args {
    struct ac_shader_args ac;
+
+   /* radv_gs_compute.h: the per-draw block of a geometry shader run as compute. */
+   struct ac_arg gs_compute_draw;
 
    struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
 

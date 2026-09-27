@@ -344,6 +344,17 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_alpha_reference_amd:
    case nir_intrinsic_load_barycentric_optimize_amd:
    case nir_intrinsic_load_poly_line_smooth_enabled:
+   /* poly's per-draw parameters (src/poly): the same for every invocation. */
+   case nir_intrinsic_load_vertex_param_buffer_poly:
+   case nir_intrinsic_load_geometry_param_buffer_poly:
+   case nir_intrinsic_load_tess_param_buffer_poly:
+   case nir_intrinsic_load_ro_sink_address_poly:
+   case nir_intrinsic_load_stat_query_address_poly:
+   case nir_intrinsic_load_input_topology_poly:
+   case nir_intrinsic_load_index_size_poly:
+   case nir_intrinsic_load_vs_outputs_poly:
+   case nir_intrinsic_load_provoking_last:
+   case nir_intrinsic_load_flat_mask:
    case nir_intrinsic_load_rasterization_primitive_amd:
    case nir_intrinsic_unit_test_uniform_input:
    case nir_intrinsic_load_debug_log_desc_amd:
@@ -486,6 +497,10 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
          is_divergent = true;
       if (options & nir_divergence_across_subgroups)
          is_divergent = true;
+      break;
+   case nir_intrinsic_ro_to_rw_poly:
+      /* The same address, writable. */
+      is_divergent = src_divergent(instr->src[0], state);
       break;
    case nir_intrinsic_load_input_vertex:
       is_divergent = src_divergent(instr->src[1], state);

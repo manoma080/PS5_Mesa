@@ -13,6 +13,7 @@
 #include "nir/nir_serialize.h"
 #include "nir/nir_xfb_info.h"
 #include "nir/radv_nir.h"
+#include "radv_gs_compute.h"
 #include "tools/radv_rmv.h"
 #include "util/mesa-blake3.h"
 #include "util/os_time.h"
@@ -2455,7 +2456,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
                               struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
                               bool is_internal, struct radv_retained_shaders *retained_shaders, bool noop_fs,
                               struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
-                              struct radv_shader_debug_info *gs_copy_debug, struct radv_shader_binary **gs_copy_binary)
+                              struct radv_shader_debug_info *gs_copy_debug, struct radv_shader_binary **gs_copy_binary,
+                              struct radv_gs_compute_binaries *gs_compute)
 {
    const bool nir_cache = compiler_info->enable_nir_cache;
 
@@ -2489,6 +2491,21 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    if (retained_shaders) {
       radv_pipeline_retain_shaders(retained_shaders, stages);
+   }
+
+   /* A geometry shader NGG cannot run goes through compute (radv_gs_compute.h):
+    * the pipeline's hardware vertex shader becomes poly's rasterization copy,
+    * drawing the geometry shader's output topology. */
+   const struct radv_graphics_state_key *api_gfx_state = gfx_state;
+   struct radv_graphics_state_key gs_compute_gfx_state;
+   struct radv_gs_compute_nir gs_compute_nir;
+   const bool gs_compute_used = gs_compute && radv_gs_compute_wanted(compiler_info, gfx_state, stages);
+   if (gs_compute_used) {
+      radv_gs_compute_split(compiler_info, stages, &gs_compute_nir);
+      gs_compute_gfx_state = *gfx_state;
+      gs_compute_gfx_state.ia.topology = radv_gs_compute_rast_topology(gs_compute_nir.info.mode);
+      gs_compute_gfx_state.vs.has_prolog = false;
+      gfx_state = &gs_compute_gfx_state;
    }
 
    VkShaderStageFlagBits active_nir_stages = 0;
@@ -2732,6 +2749,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    radv_fill_shader_info(compiler_info, RADV_PIPELINE_GRAPHICS, gfx_state, stages, active_nir_stages);
 
+   if (gs_compute_used)
+      stages[MESA_SHADER_VERTEX].info.gs_compute = RADV_GS_COMPUTE_RAST;
+
    /* Remove the primitive shading rate output if VRS flat shading overrides it. */
    radv_foreach_stage (i, active_nir_stages) {
       if (!radv_is_last_vgt_stage(&stages[i]))
@@ -2759,6 +2779,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    radv_declare_pipeline_args(compiler_info, stages, gfx_state, active_nir_stages, debug);
 
+   if (gs_compute_used)
+      radv_gs_compute_lower_sysvals(stages[MESA_SHADER_VERTEX].nir, compiler_info, &stages[MESA_SHADER_VERTEX]);
+
    radv_foreach_stage (i, active_nir_stages) {
       int64_t stage_start = os_time_get_nano();
 
@@ -2785,6 +2808,22 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    /* Compile NIR shaders to AMD assembly. */
    radv_graphics_shaders_nir_to_asm(compiler_info, cache, stages, gfx_state, active_nir_stages, debug, binaries,
                                     gs_copy_debug, gs_copy_binary);
+
+   if (gs_compute_used) {
+      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
+         if (!gs_compute_nir.nir[i])
+            continue;
+         const enum radv_gs_compute_kind kind = RADV_GS_COMPUTE_VS + i;
+         const struct radv_shader_stage *api_stage =
+            &stages[kind == RADV_GS_COMPUTE_VS ? MESA_SHADER_VERTEX : MESA_SHADER_GEOMETRY];
+         gs_compute->binaries[i] = radv_gs_compute_compile(compiler_info, api_gfx_state, api_stage, kind,
+                                                           gs_compute_nir.nir[i], &gs_compute->debug[i]);
+         ralloc_free(gs_compute_nir.nir[i]);
+      }
+      gs_compute->info = gs_compute_nir.info;
+      gs_compute->vs_outputs = gs_compute_nir.vs_outputs;
+      gs_compute->used = true;
+   }
 }
 
 void
@@ -3030,10 +3069,31 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
 
    struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
    struct radv_shader_debug_info gs_copy_debug = {0};
+   struct radv_gs_compute_binaries gs_compute = {0};
    radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
-                                 retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
+                                 retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary,
+                                 &gs_compute);
    radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
                                 &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
+
+   if (gs_compute.used) {
+      /* Its compute shaders are not in the shaders cache: the pipeline is not
+       * either. */
+      skip_shaders_cache = true;
+      pipeline->base.gs_compute = calloc(1, sizeof(*pipeline->base.gs_compute));
+      if (!pipeline->base.gs_compute)
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
+         if (gs_compute.binaries[i] && pipeline->base.gs_compute)
+            pipeline->base.gs_compute->shaders[i] =
+               radv_shader_create(device, cache, gs_compute.binaries[i], true, &gs_compute.debug[i]);
+         free(gs_compute.binaries[i]);
+      }
+      if (pipeline->base.gs_compute) {
+         pipeline->base.gs_compute->info = gs_compute.info;
+         pipeline->base.gs_compute->vs_outputs = gs_compute.vs_outputs;
+      }
+   }
 
    if (!skip_shaders_cache) {
       radv_pipeline_cache_insert(device, cache, &pipeline->base);
@@ -3354,6 +3414,14 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
 
    if (pipeline->base.gs_copy_shader)
       radv_shader_unref(device, pipeline->base.gs_copy_shader);
+
+   if (pipeline->base.gs_compute) {
+      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
+         if (pipeline->base.gs_compute->shaders[i])
+            radv_shader_unref(device, pipeline->base.gs_compute->shaders[i]);
+      }
+      free(pipeline->base.gs_compute);
+   }
 }
 
 static VkResult

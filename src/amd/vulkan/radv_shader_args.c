@@ -200,6 +200,9 @@ declare_vs_specific_input_sgprs(struct radv_shader_args_state *state, const stru
    if (info->vs.has_prolog)
       RADV_ADD_UD_ARG(state, 2, AC_ARG_VALUE, prolog_inputs, AC_UD_VS_PROLOG_INPUTS);
 
+   if (info->gs_compute == RADV_GS_COMPUTE_RAST)
+      RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, gs_compute_draw, AC_UD_VS_GS_COMPUTE_DRAW);
+
    if (info->type != RADV_SHADER_TYPE_GS_COPY) {
       if (info->vs.vb_desc_usage_mask) {
          RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ac.vertex_buffers, AC_UD_VS_VERTEX_BUFFERS);
@@ -636,6 +639,12 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
 
       if (info->vs.needs_draw_id) {
          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.draw_id, AC_UD_CS_TASK_DRAW_ID);
+      }
+
+      if (info->gs_compute != RADV_GS_COMPUTE_NONE) {
+         RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, gs_compute_draw, AC_UD_CS_GS_COMPUTE_DRAW);
+         if (info->gs_compute == RADV_GS_COMPUTE_VS)
+            RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ac.vertex_buffers, AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS);
       }
 
       if (stage == MESA_SHADER_TASK) {

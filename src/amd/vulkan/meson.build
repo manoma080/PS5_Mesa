@@ -288,6 +288,7 @@ if with_radv_ps5
   radv_deps += idep_libpoly
   radv_link_with += libpoly_nir
   radv_flags += '-DRADV_GS_COMPUTE=1'
+  libradv_files += files('radv_gs_compute.c', 'radv_gs_compute.h')
 endif
 
 radv_u_trace = get_option('radv-u_trace')

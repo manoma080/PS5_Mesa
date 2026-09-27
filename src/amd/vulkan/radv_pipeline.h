@@ -36,6 +36,8 @@ enum radv_pipeline_type {
    RADV_PIPELINE_TYPE_COUNT,
 };
 
+struct radv_gs_compute_pipeline;
+
 struct radv_pipeline {
    struct vk_object_base base;
    uint8_t blake3[BLAKE3_KEY_LEN];
@@ -50,6 +52,8 @@ struct radv_pipeline {
    bool need_push_constants_upload;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
    struct radv_shader *gs_copy_shader;
+   /* A geometry shader run as compute (radv_gs_compute.h), or NULL. */
+   struct radv_gs_compute_pipeline *gs_compute;
 
    /* Unique pipeline hash identifier. */
    uint64_t pipeline_hash;

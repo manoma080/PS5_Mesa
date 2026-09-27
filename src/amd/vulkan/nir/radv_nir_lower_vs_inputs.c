@@ -455,7 +455,9 @@ bool
 radv_nir_lower_vs_inputs(nir_shader *shader, const struct radv_compiler_info *compiler_info,
                          const struct radv_shader_stage *vs_stage, const struct radv_graphics_state_key *gfx_state)
 {
-   assert(shader->info.stage == MESA_SHADER_VERTEX);
+   /* A vertex shader run as compute before a geometry shader (radv_gs_compute.h)
+    * fetches its attributes the same way. */
+   assert(shader->info.stage == MESA_SHADER_VERTEX || vs_stage->info.gs_compute == RADV_GS_COMPUTE_VS);
 
    lower_vs_inputs_state state = {
       .info = &vs_stage->info,
