@@ -337,12 +337,15 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    info->has_timeline_syncobj = true;
    info->kernel_has_modifiers = false;
    info->has_sparse = false;
-   /* A buffer lives where the platform's direct-memory allocator puts it, and
-    * radv_ps5_buffer_create refuses a replay address, so no capture and
-    * replay feature can hold: dEQP-VK.binding_model.buffer_device_address's
-    * replay cases (723) all failed while bufferDeviceAddressCaptureReplay was
-    * reported. */
-   info->has_replayable_va = false;
+   /* A captured buffer can be placed at its address again
+    * (radv_ps5_memory_alloc_replayable); before that, every replay case of
+    * dEQP-VK.binding_model.buffer_device_address (723) failed. Outside the
+    * shaders' window captures keep clear of every other buffer; in it the
+    * kernel places buffers, so a replay there holds only if nothing took the
+    * address since, which the ray tracing pipelines' shader handles (whole
+    * shader arenas) cannot count on. */
+   info->has_replayable_va = true;
+   info->has_replayable_va_32bit = false;
    info->has_sparse_image_3d = false;
    info->has_vm_always_valid = true;
    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be

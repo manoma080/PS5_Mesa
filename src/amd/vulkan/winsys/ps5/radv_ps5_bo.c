@@ -34,20 +34,23 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
    struct radv_ps5_winsys *const ws = radv_ps5_winsys(rws);
    *out_bo = NULL;
 
-   /* Sparse buffers need page-table control a title does not have, and a
-    * buffer cannot be placed at an address an earlier run chose; the physical
-    * device reports neither (has_sparse_vm_mappings, capture replay). */
+   /* Sparse buffers need page-table control a title does not have; the
+    * physical device reports none (has_sparse_vm_mappings). */
    if (flags & RADEON_FLAG_VIRTUAL)
       return VK_ERROR_FEATURE_NOT_PRESENT;
-   if (replay_address)
-      return VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS;
+   /* Capture and replay: a captured buffer outside the window goes at the top
+    * of the device-memory region, and a replayed one at its captured address
+    * or nowhere (radv_ps5_memory_alloc_replayable). */
+   const bool window32 = flags & RADEON_FLAG_32BIT;
+   const bool replayable = (flags & RADEON_FLAG_REPLAYABLE) || replay_address;
 
    struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
    if (!bo)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
-   if (!radv_ps5_memory_alloc(size, alignment, flags & RADEON_FLAG_32BIT, &bo->memory)) {
+   if (replayable ? !radv_ps5_memory_alloc_replayable(size, alignment, window32, replay_address, &bo->memory)
+                  : !radv_ps5_memory_alloc(size, alignment, window32, &bo->memory)) {
       free(bo);
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
    bo->ws = ws;
    bo->flags = flags;

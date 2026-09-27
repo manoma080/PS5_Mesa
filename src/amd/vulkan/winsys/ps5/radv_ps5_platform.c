@@ -85,6 +85,53 @@ radv_ps5_granules_take(struct radv_ps5_granules *g, uint32_t count, uint32_t ali
    return UINT32_MAX;
 }
 
+static bool
+radv_ps5_granules_free(const struct radv_ps5_granules *g, uint32_t first, uint32_t count)
+{
+   for (uint32_t i = first; i < first + count; i++) {
+      if (g->used[i / 64] & (UINT64_C(1) << (i % 64)))
+         return false;
+   }
+   return true;
+}
+
+/* The same from the top down: where captured buffers go, away from everything
+ * else, so their addresses are still free when a replay asks for them. */
+static uint32_t
+radv_ps5_granules_take_top(struct radv_ps5_granules *g, uint32_t count, uint32_t align_granules)
+{
+   if (count == 0 || count > g->count)
+      return UINT32_MAX;
+   align_granules = MAX2(align_granules, 1);
+   simple_mtx_lock(&g->lock);
+   for (uint32_t start = (g->count - count) / align_granules * align_granules;;
+        start -= align_granules) {
+      if (radv_ps5_granules_free(g, start, count)) {
+         radv_ps5_granules_mark(g, start, count, true);
+         simple_mtx_unlock(&g->lock);
+         return start;
+      }
+      if (start < align_granules)
+         break;
+   }
+   simple_mtx_unlock(&g->lock);
+   return UINT32_MAX;
+}
+
+/* Exactly the granules from first on, if they are all free. */
+static bool
+radv_ps5_granules_take_at(struct radv_ps5_granules *g, uint32_t first, uint32_t count)
+{
+   if (count == 0 || first >= g->count || count > g->count - first)
+      return false;
+   simple_mtx_lock(&g->lock);
+   const bool free = radv_ps5_granules_free(g, first, count);
+   if (free)
+      radv_ps5_granules_mark(g, first, count, true);
+   simple_mtx_unlock(&g->lock);
+   return free;
+}
+
 static void
 radv_ps5_granules_give(struct radv_ps5_granules *g, uint32_t first, uint32_t count)
 {
@@ -258,6 +305,88 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct 
    return true;
 }
 
+/* A window buffer is replayed where the kernel agrees to put it: at the
+ * captured address given as a hint, if nothing took it since. */
+static bool
+radv_ps5_memory_replay_window(uint64_t bytes, uint64_t alignment, uint64_t replay_va, struct radv_ps5_memory *out)
+{
+   alignment = util_next_power_of_two64(MAX2(alignment, PS5_KERNEL_DIRECT_ALIGNMENT));
+   if (replay_va % alignment || !radv_ps5_window_contains(replay_va, bytes))
+      return false;
+   int64_t physical = -1;
+   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, alignment, RADV_PS5_DIRECT_TYPE,
+                                     &physical) != 0)
+      return false;
+   void *const hint = (void *)(uintptr_t)replay_va;
+   void *address = hint;
+   const int32_t result = sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, 0, physical, alignment);
+   if (result != 0 || address != hint) {
+      if (result == 0 && address != NULL)
+         sceKernelMunmap(address, bytes);
+      sceKernelReleaseDirectMemory(physical, bytes);
+      return false;
+   }
+   *out = (struct radv_ps5_memory){.cpu = address, .bytes = bytes, .physical = physical};
+   return true;
+}
+
+bool
+radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
+                                 struct radv_ps5_memory *out)
+{
+   if (window32 && !replay_va)
+      return radv_ps5_memory_alloc(bytes, alignment, true, out);
+   *out = (struct radv_ps5_memory){.physical = -1};
+   bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
+   if (window32)
+      return radv_ps5_memory_replay_window(bytes, alignment, replay_va, out);
+   alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
+   const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
+   const uint32_t align_granules = (uint32_t)(alignment / RADV_PS5_LARGE_BYTES);
+
+   uint32_t granule;
+   if (replay_va) {
+      if (replay_va < RADV_PS5_REGION_BASE || (replay_va - RADV_PS5_REGION_BASE) % alignment ||
+          (replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES > UINT32_MAX)
+         return false;
+      granule = (uint32_t)((replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES);
+      if (!radv_ps5_granules_take_at(&radv_ps5_region, granule, granules))
+         return false;
+   } else {
+      granule = radv_ps5_granules_take_top(&radv_ps5_region, granules, align_granules);
+      if (granule == UINT32_MAX)
+         return false;
+   }
+
+   int64_t physical = -1;
+   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, alignment, RADV_PS5_DIRECT_TYPE,
+                                     &physical) != 0) {
+      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
+      return false;
+   }
+   /* The address is a hint the kernel takes only where nothing is mapped:
+    * anything else it chose is given back. */
+   void *const hint = (void *)(uintptr_t)(RADV_PS5_REGION_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
+   void *address = hint;
+   const int32_t result = sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, 0, physical, alignment);
+   if (result != 0 || address != hint) {
+      if (result == 0 && address != NULL)
+         sceKernelMunmap(address, bytes);
+      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
+      sceKernelReleaseDirectMemory(physical, bytes);
+      return false;
+   }
+
+   *out = (struct radv_ps5_memory){
+      .cpu = address,
+      .bytes = bytes,
+      .physical = physical,
+      .granule = granule,
+      .granules = granules,
+   };
+   return true;
+}
+
 void
 radv_ps5_memory_free(struct radv_ps5_memory *memory)
 {
@@ -406,6 +535,44 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct 
    const uint8_t *const end = raw + span;
    if (cpu + bytes < end)
       munmap(cpu + bytes, end - (cpu + bytes));
+   *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
+   return true;
+}
+
+bool
+radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
+                                 struct radv_ps5_memory *out)
+{
+   if (!replay_va)
+      return radv_ps5_memory_alloc(bytes, alignment, window32, out);
+   *out = (struct radv_ps5_memory){.physical = -1};
+   bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
+   if (window32) {
+      const uint32_t count = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_WINDOW_GRANULE);
+      if (!radv_ps5_window_contains(replay_va, bytes) || (replay_va - RADV_PS5_WINDOW_BASE) % RADV_PS5_WINDOW_GRANULE)
+         return false;
+      const uint32_t first = (uint32_t)((replay_va - RADV_PS5_WINDOW_BASE) / RADV_PS5_WINDOW_GRANULE);
+      if (!radv_ps5_granules_take_at(&radv_ps5_window, first, count))
+         return false;
+      uint8_t *const cpu = (uint8_t *)(uintptr_t)replay_va;
+      const uint64_t span = (uint64_t)count * RADV_PS5_WINDOW_GRANULE;
+      if (mprotect(cpu, span, PROT_READ | PROT_WRITE) != 0) {
+         radv_ps5_granules_give(&radv_ps5_window, first, count);
+         return false;
+      }
+      *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = span, .physical = -1, .granule = first, .granules = count};
+      return true;
+   }
+   if (replay_va % RADV_PS5_PAGE_BYTES)
+      return false;
+   void *const cpu = mmap((void *)(uintptr_t)replay_va, bytes, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+   if (cpu == MAP_FAILED)
+      return false;
+   if (cpu != (void *)(uintptr_t)replay_va) {
+      munmap(cpu, bytes);
+      return false;
+   }
    *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
    return true;
 }

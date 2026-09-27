@@ -402,6 +402,9 @@ struct radeon_info {
     * was given (RADEON_FLAG_REPLAYABLE with a replay address): every capture
     * and replay feature needs it. */
    bool has_replayable_va;
+   /* The same for buffers in the 32-bit address window (shader arenas):
+    * ray tracing shader group handle capture and replay needs it. */
+   bool has_replayable_va_32bit;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

@@ -1348,7 +1348,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_ray_tracing_pipeline */
       .rayTracingPipeline = radv_rt_pipelines_enabled(pdev),
-      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va,
+      .rayTracingPipelineShaderGroupHandleCaptureReplay =
+         radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va_32bit,
       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
       .rayTracingPipelineTraceRaysIndirect = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
       .rayTraversalPrimitiveCulling = radv_rt_pipelines_enabled(pdev),

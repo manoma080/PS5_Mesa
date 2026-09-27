@@ -59,6 +59,12 @@ bool radv_ps5_platform_runs_gpu(void);
 bool radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32,
                            struct radv_ps5_memory *out);
 void radv_ps5_memory_free(struct radv_ps5_memory *memory);
+/* Memory for capture and replay. A capture outside the window goes at the
+ * top of the device-memory region, away from everything else; a replay goes
+ * at replay_va exactly or not at all (in the window, where the kernel places
+ * buffers, only if nothing took the address since). */
+bool radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
+                                      struct radv_ps5_memory *out);
 
 /* The direct-memory pool, which the CPU draws on too, and what it has left. */
 uint64_t radv_ps5_memory_pool_bytes(void);
