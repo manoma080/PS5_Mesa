@@ -863,7 +863,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_fault = true,
-      .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8,
+      .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8 && pdev->info.has_gpu_written_ibs,
       .EXT_device_memory_report = true,
       .EXT_discard_rectangles = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
@@ -1554,8 +1554,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .depthClampControl = true,
 
       /* VK_EXT_device_generated_commands */
-      .deviceGeneratedCommands = true,
-      .dynamicGeneratedPipelineLayout = true,
+      .deviceGeneratedCommands = pdev->info.has_gpu_written_ibs,
+      .dynamicGeneratedPipelineLayout = pdev->info.has_gpu_written_ibs,
 
       /* VK_KHR_maintenance8 */
       .maintenance8 = true,

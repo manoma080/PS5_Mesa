@@ -278,7 +278,7 @@ radv_ps5_cs_execute_ib(struct ac_cmdbuf *cs, struct radeon_winsys_bo *bo, const 
    (void)predicate;
    /* A GPU-generated command buffer runs as an INDIRECT_BUFFER, which the
     * console faults; the physical device does not report device-generated
-    * commands. */
+    * commands (radeon_info.has_gpu_written_ibs). */
    fprintf(stderr, "radv/ps5: an indirect buffer was recorded; the console cannot run one\n");
    radv_ps5_cs(cs)->status = VK_ERROR_FEATURE_NOT_PRESENT;
 }

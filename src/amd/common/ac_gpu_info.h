@@ -376,6 +376,9 @@ struct radeon_info {
    /* Whether a legacy (non-NGG) geometry shader can run: the GFX9-GFX10.3
     * rings it needs are programmed through the kernel's registers. */
    bool has_legacy_gs;
+   /* Whether the CP runs a command buffer the GPU wrote, chained with
+    * INDIRECT_BUFFER: device-generated commands need it. */
+   bool has_gpu_written_ibs;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

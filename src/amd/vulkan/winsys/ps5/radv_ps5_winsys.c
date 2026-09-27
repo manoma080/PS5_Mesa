@@ -236,6 +236,9 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
     * tessellation factor ring. */
    info->has_legacy_gs = false;
+   /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
+    * the command buffers device-generated commands write cannot run. */
+   info->has_gpu_written_ibs = false;
    info->rbplus_allowed = false;
    /* A depth-only image cleared to 0 read back 1 after a draw whose
     * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
