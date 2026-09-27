@@ -14,7 +14,6 @@
 #include "addrlib/src/amdgpu_asic_addr.h"
 #include "tools/radv_debug.h"
 #include "util/os_time.h"
-#include "util/u_debug.h"
 #include "util/u_atomic.h"
 #include "util/u_math.h"
 #include "ac_linux_drm.h"
@@ -251,13 +250,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * legacy vertex shader's per-vertex ID read 0 and 1 as it should; the
     * parameter cache is GFX10.1's, so the ID goes per vertex here too. */
    info->compiler_info.has_ngg_per_prim_params = false;
-   /* Every acceleration structure build faulted the GPU (a write to an
-    * unmapped page far past every buffer the process had, even for an empty
-    * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
-    * and host builds are not offered, so no ray tracing is reported until the
-    * build runs. RADV_PS5_RAY_TRACING=1 reports it anyway, to probe the
-    * build. */
-   info->compiler_info.has_image_bvh_intersect_ray = debug_get_bool_option("RADV_PS5_RAY_TRACING", false);
+   /* The BVH instruction is GFX10.3's (and GC 10.1.3's): acceleration
+    * structures build and ray queries traverse them (dEQP-VK.ray_query and
+    * the ray query cases elsewhere, run rq-full-1 in PS5_Vulkan). Ray tracing
+    * pipelines stay off while a shader cannot set FLAT_SCRATCH
+    * (radv_rt_pipelines_enabled). */
 
    /* What the console's layout needs beyond the NAVI21 defaults. */
    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
