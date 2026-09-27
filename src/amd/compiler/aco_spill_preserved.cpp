@@ -232,9 +232,12 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
    if (overflow) {
       bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg, s1), Definition(scc, s1),
                Operand(stack_reg, s1), Operand::c32(-first_spill_offset), Operand(scc, s1));
+      /* Adding the negative offset carries out when nothing was borrowed: the
+       * high word takes -1 plus that carry.
+       */
       if (ctx.program->dev.mubuf_scratch)
-         bld.sop2(aco_opcode::s_subb_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
-                  Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
+         bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
+                  Operand(stack_reg.advance(4), s1), Operand::c32(-1u), Operand(scc, s1));
       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
                Operand::c32(0));
       bld.sop1(aco_opcode::s_bitset0_b32, Definition(stack_reg, s1), Operand::c32(0),
