@@ -68,7 +68,7 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
       enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
       uint64_t replay_address = 0;
 
-      if (pdev->info.compiler_info.has_smem_with_null_prt_bug &&
+      if (pdev->info.compiler_info.has_smem_with_null_prt_bug && pdev->info.has_sparse_prt &&
           (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT) &&
           (buffer->vk.usage & (VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT |
                                VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT))) {

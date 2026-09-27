@@ -1209,8 +1209,10 @@ radv_device_init_compiler_info(struct radv_device *device)
             .coop_matrix_robust_buffer_access = false,
             .mitigate_smem_oob = pdev->info.compiler_info.has_smem_oob_access_bug &&
                                  !(instance->debug_flags & RADV_DEBUG_NO_SMEM_MITIGATION),
-            .mitigate_smem_with_null_prt =
-               pdev->info.compiler_info.has_smem_with_null_prt_bug && radv_sparse_enabled(pdev),
+            /* The bug is in loads from null PRT pages, which only PRT sparse
+             * binding makes. */
+            .mitigate_smem_with_null_prt = pdev->info.compiler_info.has_smem_with_null_prt_bug &&
+                                           radv_sparse_enabled(pdev) && pdev->info.has_sparse_prt,
             .bvh8 = radv_use_bvh8(pdev),
             .no_rt = !!(instance->debug_flags & RADV_DEBUG_NO_RT),
             .rt_cps = !!(instance->perftest_flags & RADV_PERFTEST_RT_CPS),
