@@ -312,7 +312,7 @@ ABI nir_abi_to_aco(unsigned nir_abi_mask);
 param_assignment_hints get_ahit_isec_param_hints(const struct callee_info& traversal_info,
                                                  bool uses_descriptor_heap);
 
-struct callee_info get_callee_info(amd_gfx_level gfx_level, unsigned wave_size, const ABI& abi,
+struct callee_info get_callee_info(bool mubuf_scratch, unsigned wave_size, const ABI& abi,
                                    unsigned param_count, const nir_parameter* parameters,
                                    Program* program, RegisterDemand reg_limit,
                                    const param_assignment_hints& param_hints = {});

@@ -1041,8 +1041,9 @@ validate_ir(Program* program)
                   "The first definition of a call instruction must be the return address",
                   instr.get());
 
-            /* On gfx6-8 the stack pointer is part of the scratch resource descriptor */
-            if (program->gfx_level >= GFX9) {
+            /* With buffer scratch (gfx6-8, and where a shader cannot set FLAT_SCRATCH) the
+             * stack pointer is part of the scratch resource descriptor */
+            if (!program->dev.mubuf_scratch) {
                check(instr->operands[0].regClass() == s1,
                      "The first operand of a call instruction must be the stack pointer",
                      instr.get());

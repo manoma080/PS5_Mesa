@@ -265,12 +265,12 @@ radv_enable_rt(const struct radv_physical_device *pdev)
 }
 
 /* Ray tracing pipelines call their shaders with a stack in scratch, which
- * ACO's calling convention addresses with scratch_* instructions on GFX9+:
- * where a shader cannot set FLAT_SCRATCH, only ray queries are reported. */
+ * ACO addresses through the scratch buffer where a shader cannot set
+ * FLAT_SCRATCH (dev.mubuf_scratch), as on GFX6-8. */
 bool
 radv_rt_pipelines_enabled(const struct radv_physical_device *pdev)
 {
-   return radv_enable_rt(pdev) && (pdev->info.gfx_level < GFX9 || pdev->info.compiler_info.has_flat_scratch);
+   return radv_enable_rt(pdev);
 }
 
 bool

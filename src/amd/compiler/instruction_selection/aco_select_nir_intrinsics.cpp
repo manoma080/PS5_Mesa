@@ -3890,9 +3890,9 @@ load_scratch_param(isel_context* ctx, Builder& bld, const parameter_info& param,
    info.align_mul = 4;
    info.align_offset = 0;
    info.cache = get_cache_flags(ctx, ACCESS_IS_SWIZZLED_AMD, ac_access_type_load);
-   info.swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 0;
+   info.swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 0;
    info.sync = memory_sync_info(storage_scratch, semantic_private);
-   if (ctx->program->gfx_level >= GFX9) {
+   if (!ctx->program->dev.mubuf_scratch) {
       if (const_offset < ctx->program->dev.scratch_global_offset_min) {
          stack_ptr = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.def(s1, scc),
                               stack_ptr == Temp() ? Operand::c32(0) : Operand(stack_ptr),
@@ -3927,12 +3927,12 @@ store_scratch_param(isel_context* ctx, Builder& bld, const parameter_info& param
    unsigned write_count = 0;
    Temp write_datas[32];
    unsigned offsets[32];
-   unsigned swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 16;
+   unsigned swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 16;
    split_buffer_store(ctx, 4, 0, false, RegType::vgpr, as_vgpr(ctx, data),
                       u_bit_consecutive(0, byte_size), swizzle_component_size, &write_count,
                       write_datas, offsets);
 
-   if (ctx->program->gfx_level < GFX9) {
+   if (ctx->program->dev.mubuf_scratch) {
       Temp scratch_rsrc = load_scratch_resource(
          ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true);
       for (unsigned i = 0; i < write_count; i++) {
@@ -5032,7 +5032,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
                   Operand(info.return_info[index_in_return_params].def.getTemp()));
       } else {
          Temp stack_ptr;
-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
+         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
             stack_ptr = bld.pseudo(aco_opcode::p_callee_stack_ptr, bld.def(s1), bld.def(s1, scc),
                                    Operand::c32(info.scratch_param_size),
                                    Operand(ctx->callee_info.stack_ptr.def.getTemp()));
@@ -5055,7 +5055,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
             ctx->allocated_vec.emplace(dst.id(), vec_it->second);
       } else {
          Temp stack_ptr = Temp();
-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
+         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
             stack_ptr = ctx->callee_info.stack_ptr.def.getTemp();
          load_scratch_param(ctx, bld, param, stack_ptr, ctx->callee_info.scratch_param_size, dst);
       }
@@ -5074,7 +5074,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
                               : bld.as_uniform(get_ssa_temp(ctx, instr->src[0].ssa)));
       } else {
          Temp stack_ptr = Temp();
-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
+         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
             stack_ptr = ctx->callee_info.stack_ptr.def.getTemp();
          store_scratch_param(ctx, bld, param, stack_ptr, ctx->callee_info.scratch_param_size,
                              get_ssa_temp(ctx, instr->src[0].ssa));

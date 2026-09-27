@@ -760,7 +760,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
    RegisterDemand limit = get_addr_regs_from_waves(ctx->program, ctx->program->min_waves);
 
    struct callee_info info =
-      get_callee_info(ctx->program->gfx_level, ctx->program->wave_size, abi,
+      get_callee_info(ctx->program->dev.mubuf_scratch, ctx->program->wave_size, abi,
                       instr->callee->num_params, instr->callee->params, nullptr, limit, hints);
    std::vector<parameter_info> return_infos;
 
@@ -778,7 +778,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
     */
 
    Temp stack_ptr, param_stack_ptr;
-   if (ctx->program->is_callee && ctx->program->gfx_level >= GFX9) {
+   if (ctx->program->is_callee && !ctx->program->dev.mubuf_scratch) {
       param_stack_ptr = bld.pseudo(aco_opcode::p_callee_stack_ptr, bld.def(s1), bld.def(s1, scc),
                                    Operand::c32(info.scratch_param_size),
                                    Operand(ctx->callee_info.stack_ptr.def.getTemp()));
@@ -801,7 +801,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
    unsigned extra_param_count = 2;
 
    unsigned param_size = info.scratch_param_size;
-   if (ctx->program->gfx_level < GFX9)
+   if (ctx->program->dev.mubuf_scratch)
       param_size *= ctx->program->wave_size;
 
    assert(info.param_infos[0].is_reg);
@@ -809,7 +809,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
                                                 info.reg_param_count + extra_param_count,
                                                 info.reg_discardable_param_count + extra_def_count);
    call_instr->call().abi = abi;
-   if (ctx->program->gfx_level >= GFX9) {
+   if (!ctx->program->dev.mubuf_scratch) {
       call_instr->operands[0] = Operand(stack_ptr, info.stack_ptr.def.physReg());
    } else {
       call_instr->operands[0] = Operand(load_scratch_resource(ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true));
@@ -1387,7 +1387,7 @@ select_program_rt(isel_context& ctx, unsigned shader_count, struct nir_shader* c
       if (nir_abi == ACO_NIR_CALL_ABI_AHIT_ISEC) {
          assert(traversal_function);
          callee_info traversal_info = get_callee_info(
-            ctx.program->gfx_level, ctx.program->wave_size, rtTraversalABI,
+            ctx.program->dev.mubuf_scratch, ctx.program->wave_size, rtTraversalABI,
             traversal_function->num_params, traversal_function->params, NULL, limit);
          callee_hints =
             get_ahit_isec_param_hints(traversal_info, ctx.program->info.descriptor_heap);
@@ -1396,7 +1396,7 @@ select_program_rt(isel_context& ctx, unsigned shader_count, struct nir_shader* c
       /* TODO: callable abi? */
       ctx.callee_abi = nir_abi_to_aco(impl->function->driver_attributes);
       ctx.program->callee_abi = ctx.callee_abi;
-      ctx.callee_info = get_callee_info(ctx.program->gfx_level, ctx.program->wave_size,
+      ctx.callee_info = get_callee_info(ctx.program->dev.mubuf_scratch, ctx.program->wave_size,
                                         ctx.callee_abi, impl->function->num_params,
                                         impl->function->params, ctx.program, limit, callee_hints);
       ctx.program->is_callee = true;

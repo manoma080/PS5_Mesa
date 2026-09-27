@@ -188,12 +188,12 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
    if (overflow) {
       spill_stack_base = first_spill_offset;
 
-      if (ctx.program->gfx_level < GFX9)
+      if (ctx.program->dev.mubuf_scratch)
          first_spill_offset *= ctx.program->wave_size;
 
       bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg, s1), Definition(scc, s1),
                Operand(stack_reg, s1), Operand::c32(first_spill_offset), Operand(scc, s1));
-      if (ctx.program->gfx_level < GFX9)
+      if (ctx.program->dev.mubuf_scratch)
          bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
                   Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
@@ -202,7 +202,7 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
    }
 
    for (const auto& spill : spills) {
-      if (ctx.program->gfx_level >= GFX9) {
+      if (!ctx.program->dev.mubuf_scratch) {
          if (reload)
             bld.scratch(aco_opcode::scratch_load_dword, Definition(spill.first, linear ? lv1 : v1),
                         Operand(v1), Operand(stack_reg, s1), spill.second - spill_stack_base,
@@ -232,7 +232,7 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
    if (overflow) {
       bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg, s1), Definition(scc, s1),
                Operand(stack_reg, s1), Operand::c32(-first_spill_offset), Operand(scc, s1));
-      if (ctx.program->gfx_level < GFX9)
+      if (ctx.program->dev.mubuf_scratch)
          bld.sop2(aco_opcode::s_subb_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
                   Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
@@ -537,7 +537,7 @@ emit_call_spills(spill_preserved_ctx& ctx)
             Builder bld(ctx.program, &spill_instructions);
 
             PhysReg stack_reg = instr->operands[0].physReg();
-            if (ctx.program->gfx_level < GFX9)
+            if (ctx.program->dev.mubuf_scratch)
                scratch_offset *= ctx.program->wave_size;
 
             emit_vgpr_spills_reloads(ctx, bld, spills, stack_reg, false, true);

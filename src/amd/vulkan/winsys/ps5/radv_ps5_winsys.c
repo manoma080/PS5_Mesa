@@ -313,8 +313,7 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    /* The BVH instruction is GFX10.3's (and GC 10.1.3's): acceleration
     * structures build and ray queries traverse them (dEQP-VK.ray_query and
     * the ray query cases elsewhere, run rq-full-1 in PS5_Vulkan), so the
-    * description keeps it. Ray tracing pipelines stay off while a shader
-    * cannot set FLAT_SCRATCH (radv_rt_pipelines_enabled). */
+    * description keeps it. */
 
    /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
     * RADV_DEBUG=nongg: 31 of 33 cases). Why is not established: RADV sets the
