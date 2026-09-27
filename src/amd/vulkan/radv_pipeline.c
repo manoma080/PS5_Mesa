@@ -1001,6 +1001,12 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
 static VkResult
 radv_copy_representation(void *data, size_t *data_size, const char *src)
 {
+   /* A representation that was not recorded (ACO's IR and disassembly are
+    * printed through open_memstream, which a platform may lack) reads as
+    * empty text. */
+   if (!src)
+      src = "";
+
    size_t total_size = strlen(src) + 1;
 
    if (!data) {
@@ -1057,15 +1063,17 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    }
    ++p;
 
-   /* Disassembler */
-   if (p < end && shader->dbg.disasm_string) {
-      p->isText = true;
-      VK_COPY_STR(p->name, "Assembly");
-      VK_COPY_STR(p->description, "Final Assembly");
-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
-         result = VK_INCOMPLETE;
+   /* Disassembler: only when there is one (ACO disassembles through LLVM). */
+   if (shader->dbg.disasm_string) {
+      if (p < end) {
+         p->isText = true;
+         VK_COPY_STR(p->name, "Assembly");
+         VK_COPY_STR(p->description, "Final Assembly");
+         if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
+            result = VK_INCOMPLETE;
+      }
+      ++p;
    }
-   ++p;
 
    if (!pInternalRepresentations)
       *pInternalRepresentationCount = p - pInternalRepresentations;
