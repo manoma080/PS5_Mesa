@@ -237,6 +237,14 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * tessellation factor ring. */
    info->has_legacy_gs = false;
    info->rbplus_allowed = false;
+   /* A depth-only image cleared to 0 read back 1 after a draw whose
+    * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
+    * with RADV_DEBUG=nohiz or nofastclears it passed): the TC-compatible
+    * HTILE clear bug Mesa records for GFX8 and GFX1013 (the BC-250, whose
+    * missing dot products this GPU shares too). This turns on its
+    * workaround, ZRANGE_PRECISION 0 after a clear to 0. */
+   info->has_htile_tc_z_clear_bug_without_stencil = true;
+   info->has_htile_tc_z_clear_bug_with_stencil = true;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
    info->address32_hi = RADV_PS5_ADDRESS32_HI;
