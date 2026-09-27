@@ -2758,7 +2758,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    radv_fill_shader_info(compiler_info, RADV_PIPELINE_GRAPHICS, gfx_state, stages, active_nir_stages);
 
-   if (gs_compute_used)
+   const bool gs_compute_rast = gs_compute_used || stages[MESA_SHADER_VERTEX].gs_compute_rast;
+   if (gs_compute_rast)
       stages[MESA_SHADER_VERTEX].info.gs_compute = RADV_GS_COMPUTE_RAST;
 
    /* Remove the primitive shading rate output if VRS flat shading overrides it. */
@@ -2788,7 +2789,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    radv_declare_pipeline_args(compiler_info, stages, gfx_state, active_nir_stages, debug);
 
-   if (gs_compute_used)
+   if (gs_compute_rast)
       radv_gs_compute_lower_sysvals(stages[MESA_SHADER_VERTEX].nir, compiler_info, &stages[MESA_SHADER_VERTEX]);
 
    radv_foreach_stage (i, active_nir_stages) {
@@ -2825,6 +2826,16 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
          const enum radv_gs_compute_kind kind = RADV_GS_COMPUTE_VS + i;
          const struct radv_shader_stage *api_stage =
             &stages[kind == RADV_GS_COMPUTE_VS ? MESA_SHADER_VERTEX : MESA_SHADER_GEOMETRY];
+         /* With a dynamic vertex input, the vertex pass waits for the draw's. */
+         if (kind == RADV_GS_COMPUTE_VS && api_gfx_state->vs.has_prolog) {
+            struct blob blob;
+            blob_init(&blob);
+            nir_serialize(&blob, gs_compute_nir.nir[i], false);
+            blob_finish_get_buffer(&blob, &gs_compute->vs_nir, &gs_compute->vs_nir_size);
+            gs_compute->vs_key = api_stage->key;
+            ralloc_free(gs_compute_nir.nir[i]);
+            continue;
+         }
          gs_compute->binaries[i] = radv_gs_compute_compile(compiler_info, api_gfx_state, api_stage, kind,
                                                            gs_compute_nir.nir[i], &gs_compute->debug[i]);
          ralloc_free(gs_compute_nir.nir[i]);
@@ -3107,7 +3118,14 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       if (pipeline->base.gs_compute) {
          pipeline->base.gs_compute->info = gs_compute.info;
          pipeline->base.gs_compute->vs_outputs = gs_compute.vs_outputs;
+         if (gs_compute.vs_nir) {
+            pipeline->base.gs_compute->deferred_vs = radv_gs_compute_deferred_vs_create(
+               device, &gs_compute, &gfx_state->layout, &gfx_state->key.gfx_state);
+            if (!pipeline->base.gs_compute->deferred_vs)
+               result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         }
       }
+      free(gs_compute.vs_nir);
    }
 
    if (!skip_shaders_cache) {
@@ -3435,6 +3453,7 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
          if (pipeline->base.gs_compute->shaders[i])
             radv_shader_unref(device, pipeline->base.gs_compute->shaders[i]);
       }
+      radv_gs_compute_deferred_vs_destroy(device, pipeline->base.gs_compute->deferred_vs);
       free(pipeline->base.gs_compute);
    }
 }

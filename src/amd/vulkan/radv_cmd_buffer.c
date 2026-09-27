@@ -14264,6 +14264,35 @@ radv_gs_compute_restore_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t o
    radeon_end();
 }
 
+/* The draw's vertex input as a pipeline's state key holds it, for a vertex
+ * pass compiled at the draw (radv_gs_compute_deferred_vs). */
+static void
+radv_gs_compute_vi_key(const struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_state_key *key)
+{
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_vertex_input_state *vi = &cmd_buffer->state.dynamic.vertex_input;
+
+   memset(key, 0, sizeof(*key));
+   key->vi.attributes_valid = vi->attribute_mask;
+   key->vi.instance_rate_inputs = vi->instance_rate_inputs & vi->attribute_mask;
+   u_foreach_bit (i, vi->attribute_mask) {
+      const enum pipe_format format = vi->formats[i];
+      const uint32_t binding = vi->bindings[i];
+      key->vi.vertex_attribute_formats[i] = format;
+      key->vi.vertex_attribute_bindings[i] = binding;
+      key->vi.vertex_attribute_offsets[i] = vi->offsets[i];
+      if (key->vi.instance_rate_inputs & BITFIELD_BIT(i))
+         key->vi.instance_rate_divisors[i] = vi->divisors[i];
+
+      const struct ac_vtx_format_info *vtx_info =
+         ac_get_vtx_format_info(pdev->info.gfx_level, pdev->info.compiler_info.has_vtx_format_alpha_adjust_bug, format);
+      const unsigned align = vtx_info->chan_byte_size ? vtx_info->chan_byte_size : vtx_info->element_size;
+      if (vi->offsets[i] % align == 0)
+         key->vi.vertex_binding_align[binding] = MAX2(key->vi.vertex_binding_align[binding], align);
+   }
+}
+
 /* The vertex shader, the count pass, the prefix sum of the counts, the
  * pre-GS setup and the geometry shader proper, sized by the CPU or by the
  * setup pass at setup_va. xfb_offsets_va holds the transform feedback
@@ -14280,7 +14309,15 @@ radv_gs_compute_run_passes(struct radv_cmd_buffer *cmd_buffer, const struct radv
    if (xfb_offsets_va)
       radv_gs_compute_save_streamout(cmd_buffer, xfb_offsets_va);
 
-   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)], draw_va, vertices,
+   const struct radv_shader *vs = gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)];
+   if (!vs && gsc->deferred_vs) {
+      struct radv_graphics_state_key vi_key;
+      radv_gs_compute_vi_key(cmd_buffer, &vi_key);
+      vs = radv_gs_compute_deferred_vs_get(radv_cmd_buffer_device(cmd_buffer), gsc->deferred_vs, &vi_key);
+      if (!vs)
+         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   radv_gs_compute_dispatch(cmd_buffer, vs, draw_va, vertices,
                             instances, vs_groups);
    radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)], draw_va, prims,
                             instances, gs_groups);

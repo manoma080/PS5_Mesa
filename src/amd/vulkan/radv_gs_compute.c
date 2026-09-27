@@ -10,7 +10,10 @@
 
 #include "nir/radv_nir.h"
 #include "nir_builder.h"
+#include "nir_serialize.h"
 #include "radv_pipeline.h"
+#include "radv_pipeline_cache.h"
+#include "radv_device.h"
 #include "radv_shader.h"
 #include "radv_shader_args.h"
 #include "radv_shader_info.h"
@@ -34,9 +37,9 @@ radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const str
    if (!compiler_info->key.no_legacy_gs || !gs || !stages[MESA_SHADER_VERTEX].nir)
       return false;
 
-   /* So far: a vertex shader feeding the geometry shader, with its vertex input
-    * known when the pipeline is compiled. */
-   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir || gfx_state->vs.has_prolog)
+   /* So far: a vertex shader feeding the geometry shader. Its vertex input may
+    * come at the draw (radv_gs_compute_deferred_vs). */
+   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir)
       return false;
 
    /* Transform feedback from a geometry shader, which NGG cannot capture here
@@ -128,36 +131,35 @@ strip_side_effects(nir_shader *nir)
    } while (progress);
 }
 
-void
-radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
-                      struct radv_gs_compute_nir *out)
+/* The vertex shader's half: its outputs go to memory, where the geometry
+ * shader reads them; returns the mask that fixes their layout. */
+uint64_t
+radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key)
 {
-   struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
-   struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
-   nir_shader *vs = vs_stage->nir;
-   nir_shader *gs = gs_stage->nir;
-
-   memset(out, 0, sizeof(*out));
-
    radv_nir_lower_io(vs);
-   radv_nir_lower_io(gs);
    NIR_PASS(_, vs, nir_lower_vars_to_ssa);
+   radv_optimize_nir(vs, key->optimisations_disabled);
+   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+
+   uint64_t outputs = vs->info.outputs_written;
+   NIR_PASS(_, vs, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow, &outputs);
+   return outputs;
+}
+
+/* The geometry shader's half: poly's count pass, pre-GS setup, the GS proper
+ * (out->nir) and the rasterization copy (returned). The GS reads the vertex
+ * outputs through the mask the draw passes (poly's vertex parameters), so this
+ * half does not depend on the vertex shader. */
+nir_shader *
+radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key, struct radv_gs_compute_nir *out)
+{
+   radv_nir_lower_io(gs);
    NIR_PASS(_, gs, nir_lower_vars_to_ssa);
-   radv_optimize_nir(vs, vs_stage->key.optimisations_disabled);
-   radv_optimize_nir(gs, gs_stage->key.optimisations_disabled);
+   radv_optimize_nir(gs, key->optimisations_disabled);
    /* poly keeps the memory writes in a count pass only when the shader's
     * information says it writes memory: gather it again after lowering. */
-   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
 
-   /* The vertex shader: its outputs to memory, where the geometry shader reads
-    * them. The mask fixes the layout both sides use. */
-   out->vs_outputs = vs->info.outputs_written;
-   NIR_PASS(_, vs, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow,
-            &out->vs_outputs);
-
-   /* The geometry shader: poly's count pass, pre-GS setup, the GS proper and
-    * the rasterization copy. */
    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
    NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
 
@@ -188,10 +190,24 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
     * SPIR-V: poly made it after that. */
    NIR_PASS(_, rast, nir_lower_system_values);
 
-   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs;
    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)] = count;
    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)] = pre_gs;
    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)] = gs;
+   return rast;
+}
+
+void
+radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
+                      struct radv_gs_compute_nir *out)
+{
+   (void)compiler_info;
+   struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
+   struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
+
+   memset(out, 0, sizeof(*out));
+   out->vs_outputs = radv_gs_compute_lower_vs(vs_stage->nir, &vs_stage->key);
+   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs_stage->nir;
+   nir_shader *const rast = radv_gs_compute_split_gs(gs_stage->nir, &gs_stage->key, out);
 
    /* The pipeline's hardware vertex shader is the rasterization copy; there is
     * no hardware geometry shader. */
@@ -445,6 +461,96 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
    struct radv_shader_binary *binary = radv_shader_nir_to_asm(compiler_info, &stage, &nir, 1, NULL);
    radv_shader_dump_asm(compiler_info, debug, binary, &stage.info);
    return binary;
+}
+
+struct radv_gs_compute_deferred_vs *
+radv_gs_compute_deferred_vs_create(struct radv_device *device, const struct radv_gs_compute_binaries *binaries,
+                                   const struct radv_pipeline_layout *layout,
+                                   const struct radv_graphics_state_key *gfx_state)
+{
+   struct radv_gs_compute_deferred_vs *deferred = calloc(1, sizeof(*deferred));
+   if (!deferred)
+      return NULL;
+   deferred->nir = malloc(binaries->vs_nir_size);
+   if (!deferred->nir) {
+      free(deferred);
+      return NULL;
+   }
+   memcpy(deferred->nir, binaries->vs_nir, binaries->vs_nir_size);
+   deferred->nir_size = binaries->vs_nir_size;
+   deferred->key = binaries->vs_key;
+   deferred->gfx_state = *gfx_state;
+   radv_pipeline_layout_init(device, &deferred->layout, layout->independent_sets);
+   for (uint32_t s = 0; s < layout->num_sets; s++) {
+      if (layout->set[s].layout)
+         radv_pipeline_layout_add_set(&deferred->layout, s, layout->set[s].layout);
+   }
+   simple_mtx_init(&deferred->lock, mtx_plain);
+   util_dynarray_init(&deferred->variants, NULL);
+   return deferred;
+}
+
+void
+radv_gs_compute_deferred_vs_destroy(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred)
+{
+   if (!deferred)
+      return;
+   util_dynarray_foreach (&deferred->variants, struct radv_gs_compute_vs_variant, variant)
+      radv_shader_unref(device, variant->shader);
+   util_dynarray_fini(&deferred->variants);
+   simple_mtx_destroy(&deferred->lock);
+   radv_pipeline_layout_finish(device, &deferred->layout);
+   free(deferred->nir);
+   free(deferred);
+}
+
+struct radv_shader *
+radv_gs_compute_deferred_vs_get(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred,
+                                const struct radv_graphics_state_key *vi_key)
+{
+   struct radv_shader *shader = NULL;
+
+   simple_mtx_lock(&deferred->lock);
+   util_dynarray_foreach (&deferred->variants, struct radv_gs_compute_vs_variant, variant) {
+      if (!memcmp(&variant->vi_key.vi, &vi_key->vi, sizeof(vi_key->vi))) {
+         shader = variant->shader;
+         break;
+      }
+   }
+
+   if (!shader) {
+      const struct radv_compiler_info *compiler_info = &device->compiler_info;
+      struct blob_reader reader;
+      blob_reader_init(&reader, deferred->nir, deferred->nir_size);
+      nir_shader *nir = nir_deserialize(NULL, &compiler_info->nir_options[MESA_SHADER_VERTEX], &reader);
+
+      struct radv_shader_stage stage;
+      memset(&stage, 0, sizeof(stage));
+      stage.stage = MESA_SHADER_VERTEX;
+      stage.next_stage = MESA_SHADER_GEOMETRY;
+      stage.entrypoint = "main";
+      stage.key = deferred->key;
+      radv_shader_layout_init(&deferred->layout, MESA_SHADER_VERTEX, &stage.layout);
+
+      struct radv_graphics_state_key gfx_state = deferred->gfx_state;
+      memcpy(&gfx_state.vi, &vi_key->vi, sizeof(gfx_state.vi));
+      gfx_state.vs.has_prolog = false;
+
+      struct radv_shader_debug_info debug = {0};
+      struct radv_shader_binary *binary =
+         radv_gs_compute_compile(compiler_info, &gfx_state, &stage, RADV_GS_COMPUTE_VS, nir, &debug);
+      ralloc_free(nir);
+      if (binary) {
+         shader = radv_shader_create(device, NULL, binary, true, &debug);
+         free(binary);
+      }
+      if (shader) {
+         const struct radv_gs_compute_vs_variant variant = {.vi_key = *vi_key, .shader = shader};
+         util_dynarray_append(&deferred->variants, variant);
+      }
+   }
+   simple_mtx_unlock(&deferred->lock);
+   return shader;
 }
 
 VkResult

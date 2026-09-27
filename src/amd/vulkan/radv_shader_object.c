@@ -171,6 +171,7 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
       stages[i].stage = MESA_SHADER_NONE;
       stages[i].gs_copy_shader = NULL;
+      stages[i].gs_compute_rast = false;
       stages[i].nir = NULL;
       stages[i].spirv.size = 0;
       stages[i].next_stage = MESA_SHADER_NONE;
@@ -437,6 +438,7 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
       stages[i].stage = MESA_SHADER_NONE;
       stages[i].gs_copy_shader = NULL;
+      stages[i].gs_compute_rast = false;
       stages[i].nir = NULL;
       stages[i].spirv.size = 0;
       stages[i].next_stage = MESA_SHADER_NONE;

@@ -12,7 +12,10 @@
 #include <stdint.h>
 
 #include "poly/nir/poly_nir.h"
+#include "util/simple_mtx.h"
+#include "util/u_dynarray.h"
 #include "radv_gs_compute_abi.h"
+#include "radv_pipeline_layout.h"
 #include "radv_shader.h"
 #include "radv_shader_info.h"
 #include "sid.h"
@@ -65,18 +68,46 @@ struct radv_gs_compute_nir {
    uint64_t vs_outputs;
 };
 
-/* What a pipeline compile hands back (radv_graphics_shaders_compile). */
+/* What a pipeline compile hands back (radv_graphics_shaders_compile). With
+ * the vertex input unknown when the pipeline is compiled (a dynamic vertex
+ * input, which a hardware vertex shader takes through a prolog), the vertex
+ * pass is not compiled: its lowered NIR comes back serialized instead, with
+ * the vertex stage's key, for radv_gs_compute_deferred_vs_create. */
 struct radv_gs_compute_binaries {
    bool used;
    struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
    struct radv_shader_debug_info debug[RADV_GS_COMPUTE_SHADERS];
    struct poly_gs_info info;
    uint64_t vs_outputs;
+   void *vs_nir;
+   size_t vs_nir_size;
+   struct radv_shader_stage_key vs_key;
 };
 
-/* What a pipeline keeps (radv_pipeline.gs_compute). */
+/* A vertex pass compiled at the draw, one variant per vertex input the draws
+ * bring: the serialized vertex pass, what compiles it (the vertex stage's key
+ * and layout, the pipeline's state key) and the variants built so far. */
+struct radv_gs_compute_deferred_vs {
+   void *nir;
+   size_t nir_size;
+   struct radv_shader_stage_key key;
+   struct radv_pipeline_layout layout;
+   struct radv_graphics_state_key gfx_state;
+   simple_mtx_t lock;
+   /* struct radv_gs_compute_vs_variant */
+   struct util_dynarray variants;
+};
+
+struct radv_gs_compute_vs_variant {
+   struct radv_graphics_state_key vi_key; /* only vi is compared */
+   struct radv_shader *shader;
+};
+
+/* What a pipeline keeps (radv_pipeline.gs_compute). shaders[VS] is NULL
+ * where deferred_vs builds the vertex pass at the draw. */
 struct radv_gs_compute_pipeline {
    struct radv_shader *shaders[RADV_GS_COMPUTE_SHADERS];
+   struct radv_gs_compute_deferred_vs *deferred_vs;
    struct poly_gs_info info;
    uint64_t vs_outputs;
 };
@@ -132,6 +163,12 @@ bool radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info,
 void radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
                            struct radv_gs_compute_nir *out);
 
+/* The two halves radv_gs_compute_split joins, for shaders compiled apart
+ * (shader objects). */
+uint64_t radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key);
+nir_shader *radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key,
+                                     struct radv_gs_compute_nir *out);
+
 /* Replaces the system values a geometry shader run as compute reads (poly's,
  * the draw's) with loads from the draw block; the stage's arguments must be
  * declared. */
@@ -143,6 +180,18 @@ struct radv_shader_binary *radv_gs_compute_compile(const struct radv_compiler_in
                                                    const struct radv_shader_stage *vs_stage,
                                                    enum radv_gs_compute_kind kind, nir_shader *nir,
                                                    struct radv_shader_debug_info *debug);
+
+struct radv_gs_compute_deferred_vs *
+radv_gs_compute_deferred_vs_create(struct radv_device *device, const struct radv_gs_compute_binaries *binaries,
+                                   const struct radv_pipeline_layout *layout,
+                                   const struct radv_graphics_state_key *gfx_state);
+void radv_gs_compute_deferred_vs_destroy(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred);
+
+/* The vertex pass for the vertex input in vi_key (its vi field), compiled on
+ * first use; NULL if it cannot be. */
+struct radv_shader *radv_gs_compute_deferred_vs_get(struct radv_device *device,
+                                                    struct radv_gs_compute_deferred_vs *deferred,
+                                                    const struct radv_graphics_state_key *vi_key);
 
 /* The meta compute passes of a draw (cl/radv_gs_compute.cl): setting up one
  * whose counts live in memory, unrolling its primitive restarts, and the
