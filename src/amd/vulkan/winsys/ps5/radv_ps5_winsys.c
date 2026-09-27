@@ -141,29 +141,30 @@ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs
  * compute units of 40) and the render-backend layout. Probe S3 measures them;
  * until then they only size scratch and a few hardware limits. */
 #define RADV_PS5_EXTERNAL_REV 0x28 /* the NAVI21 range: GFX10.3 */
-/* GFX1013's range: AddrLib's non-RB+ GFX10 swizzles, with the depth/stencil
- * mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
- * mips was laid out in three 64 KiB blocks, its 128x128 level in the mip
- * tail, while the depth block wrote level 0 into a fourth (a write past the
- * image: dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*). */
-#define RADV_PS5_ADDRLIB_REV 0x82
+/* The revision of the GC 10.1.3 model (radv_ps5_take_gc_10_1_3_traits): the
+ * start of GFX1013's range. */
+#define RADV_PS5_GFX1013_REV 0x82
 #define RADV_PS5_GB_ADDR_CONFIG 0x00100044
 
+/* A GFX10 GPU with the console's units, clocks and memory, as the amdgpu
+ * kernel would report it and ac_gpu_info completes it; the IP version and the
+ * revision decide which GFX10 it is. */
 static void
-radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+radv_ps5_fill_info(struct radeon_info *info, bool compiler_compat_mode, uint32_t ip_minor,
+                   uint32_t ip_discovery_version, uint32_t external_rev)
 {
    const struct drm_amdgpu_info_hw_ip gfx_ip = {
       .hw_ip_version_major = 10,
-      .hw_ip_version_minor = 3,
+      .hw_ip_version_minor = ip_minor,
       .ib_start_alignment = 32,
       .ib_size_alignment = 32,
       .available_rings = 0x1,
-      .ip_discovery_version = 0xa0300,
+      .ip_discovery_version = ip_discovery_version,
    };
    struct drm_amdgpu_info_device dev = {
       .device_id = 0,
       .chip_rev = 0,
-      .external_rev = RADV_PS5_EXTERNAL_REV,
+      .external_rev = external_rev,
       .family = FAMILY_NV,
       /* Provisional until S3. */
       .num_shader_engines = 2,
@@ -218,7 +219,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    ac_fill_hw_ip_info(info, &dev, AMD_IP_GFX, &gfx_ip);
    info->ip[AMD_IP_GFX].num_instances = 1;
    ac_identify_chip(info, &dev);
-   snprintf(info->marketing_name, sizeof(info->marketing_name), "PlayStation 5 GPU");
    ac_fill_memory_info(info, &dev, &memory);
    ac_fill_hw_info(info, &dev);
    ac_fill_tiling_info(info, &gpu_info);
@@ -226,42 +226,101 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    ac_fill_bug_info(info);
    ac_fill_tess_info(info);
    ac_fill_compiler_info(info, &dev, compiler_compat_mode);
-   /* The integer dot-product instructions do not compute what they should
-    * here: NGG's workgroup repack sums its counts with v_dot4_u32_u8, and
-    * with it a geometry shader whose vertex count is not constant, and a
-    * tessellated patch that NGG culling repacked, drew nothing. Without
-    * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
-    * RADV smoke title's geometry and tessellation checks). */
-   info->compiler_info.has_accelerated_dot_product = false;
+}
+
+/* The GPU's fixed-function blocks are GC 10.1.3's, the chip of the AMD BC-250
+ * (Mesa's CHIP_GFX1013, "GFX10 plus ray tracing instructions"; upstream amdgpu
+ * programs it as GC 10.1.3 with the GB_ADDR_CONFIG above), while register
+ * programming and the shader core behave as GFX10.3's, the identity RADV gets.
+ * So these traits come from Mesa's GFX1013 model, derived from the same inputs.
+ * Each was first found on the console as a symptom (PS5_Vulkan RADV_PHASE.md,
+ * 2026-09-27, has the audit), and the model gives every one of them; the
+ * assertion keeps the model and the measurements in step across Mesa updates.
+ *
+ * - No accelerated dot products: v_dot4_u32_u8 does not compute here. NGG's
+ *   workgroup repack sums its counts with it, and a geometry shader whose
+ *   vertex count is not constant, or a tessellated patch NGG culling repacked,
+ *   drew nothing; with the v_msad_u8 fallback both draw every texel (the RADV
+ *   smoke title's geometry and tessellation checks).
+ * - No GFX10.3 wave ID in TG_SIZE: a 128-invocation workgroup of wave64
+ *   reported one subgroup where two ran
+ *   (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size); bits 20-24
+ *   read 0, and the ordered wave ID serves instead.
+ * - No per-primitive NGG parameters: a fragment shader reading gl_PrimitiveID
+ *   that no earlier stage writes read 0 behind an NGG vertex shader
+ *   (dEQP-VK.pipeline.*.misc.implicit_primitive_id; the smoke title's
+ *   primitive ID check).
+ * - No strict vertex order: the second of two triangles read its per-vertex
+ *   inputs rotated with or without ROTATE_PC_PTR, so
+ *   VK_KHR_fragment_shader_barycentric is not reported (the smoke title's
+ *   barycentric pair; dEQP-VK.fragment_shading_barycentric.data).
+ * - No variable-rate shading: a 2x2 pipeline rate ran the fragment shader once
+ *   a texel and read gl_ShadingRateEXT as 1x1 (the smoke title's shading-rate
+ *   check; dEQP-VK.fragment_shading_rate), so VK_KHR_fragment_shading_rate is
+ *   not reported. No RB+ either.
+ * - No E5B9G9R9 colour target: every blit into it with a non-zero colour read
+ *   back wrong (dEQP-VK.api.copy_and_blit.*.blit_image.all_formats.color.*.
+ *   e5b9g9r9_ufloat_pack32, 500 cases).
+ * - The TC-compatible HTILE clear bug: a depth-only image cleared to 0 read back
+ *   1 after a draw whose fragments were all discarded
+ *   (dEQP-VK.dynamic_state.*.discard.depth); its workaround sets
+ *   ZRANGE_PRECISION 0 after a clear to 0.
+ * - GFX1013's AddrLib revision: non-RB+ GFX10 swizzles with the depth/stencil
+ *   mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
+ *   mips was laid out in three 64 KiB blocks, its 128x128 level in the mip tail,
+ *   while the depth block wrote level 0 into a fourth
+ *   (dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*).
+ *
+ * GFX1013's model differs from GFX10.3 in more than these; the rest is not
+ * taken until measured here (the audit lists them). */
+static void
+radv_ps5_take_gc_10_1_3_traits(struct radeon_info *info, bool compiler_compat_mode)
+{
+   struct radeon_info model;
+   radv_ps5_fill_info(&model, compiler_compat_mode, 1, 0xa0103, RADV_PS5_GFX1013_REV);
+   assert(model.family == CHIP_GFX1013);
+
+   info->compiler_info.has_accelerated_dot_product = model.compiler_info.has_accelerated_dot_product;
+   info->compiler_info.has_cs_wave_id = model.compiler_info.has_cs_wave_id;
+   info->compiler_info.has_ngg_per_prim_params = model.compiler_info.has_ngg_per_prim_params;
+   info->has_ps_strict_vertex_order = model.has_ps_strict_vertex_order;
+   info->has_vrs = model.has_vrs;
+   info->rbplus_allowed = model.rbplus_allowed;
+   info->has_rgb9e5_color_target = model.has_rgb9e5_color_target;
+   info->has_htile_tc_z_clear_bug_without_stencil = model.has_htile_tc_z_clear_bug_without_stencil;
+   info->has_htile_tc_z_clear_bug_with_stencil = model.has_htile_tc_z_clear_bug_with_stencil;
+   info->chip_external_rev = model.chip_external_rev;
+
+   assert(!info->compiler_info.has_accelerated_dot_product && !info->compiler_info.has_cs_wave_id &&
+          !info->compiler_info.has_ngg_per_prim_params && !info->has_ps_strict_vertex_order && !info->has_vrs &&
+          !info->rbplus_allowed && !info->has_rgb9e5_color_target && info->has_htile_tc_z_clear_bug_without_stencil &&
+          info->has_htile_tc_z_clear_bug_with_stencil && info->chip_external_rev == RADV_PS5_GFX1013_REV);
+}
+
+static void
+radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+{
+   radv_ps5_fill_info(info, compiler_compat_mode, 3, 0xa0300, RADV_PS5_EXTERNAL_REV);
+   snprintf(info->marketing_name, sizeof(info->marketing_name), "PlayStation 5 GPU");
+   radv_ps5_take_gc_10_1_3_traits(info, compiler_compat_mode);
+
+   /* What the platform, not the chip, rules out. */
    /* Every wave of a shader using scratch_* instructions faulted (MEMVIOL) a
     * few instructions in, where it had set FLAT_SCRATCH with s_setreg; the
     * same shaders through buffer instructions, as on GFX8, run (the smoke
     * title's scratch checks, graphicsfuzz's large private arrays). */
    info->compiler_info.has_flat_scratch = false;
-   /* A 128-invocation workgroup of wave64 reported one subgroup where two ran
-    * (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size): TG_SIZE's
-    * GFX10.3 wave ID (bits 20-24) reads 0, as on GFX10.1, whose ordered wave
-    * ID serves instead. */
-   info->compiler_info.has_cs_wave_id = false;
-   /* A fragment shader reading gl_PrimitiveID that no earlier stage writes read
-    * 0 for every primitive behind an NGG vertex shader, which exports it as a
-    * per-primitive parameter on GFX10.3 (dEQP-VK.pipeline.*.misc.
-    * implicit_primitive_id; the RADV smoke title's primitive ID check). The
-    * legacy vertex shader's per-vertex ID read 0 and 1 as it should; the
-    * parameter cache is GFX10.1's, so the ID goes per vertex here too. */
-   info->compiler_info.has_ngg_per_prim_params = false;
    /* The BVH instruction is GFX10.3's (and GC 10.1.3's): acceleration
     * structures build and ray queries traverse them (dEQP-VK.ray_query and
-    * the ray query cases elsewhere, run rq-full-1 in PS5_Vulkan). Ray tracing
-    * pipelines stay off while a shader cannot set FLAT_SCRATCH
-    * (radv_rt_pipelines_enabled). */
+    * the ray query cases elsewhere, run rq-full-1 in PS5_Vulkan), so the
+    * description keeps it. Ray tracing pipelines stay off while a shader
+    * cannot set FLAT_SCRATCH (radv_rt_pipelines_enabled). */
 
-   /* What the console's layout needs beyond the NAVI21 defaults. */
-   info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
    /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
-    * RADV_DEBUG=nongg: 31 of 33 cases), and neither AGC library exports a
-    * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
-    * tessellation factor ring. */
+    * RADV_DEBUG=nongg: 31 of 33 cases). Why is not established: RADV sets the
+    * GS ring sizes with a UCONFIG write, as it does everywhere, while the
+    * tessellation rings are AGC's (sceAgcDriverSetTFRing); whether the GS
+    * ring sizes are too is unmeasured. */
    info->has_legacy_gs = false;
    /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
     * the command buffers device-generated commands write cannot run. */
@@ -271,29 +330,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * lock VK_KHR_performance_query takes always failed
     * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
    info->has_perf_counters = false;
-   /* The second of two triangles read its per-vertex inputs rotated, (v5, v3,
-    * v4) for (v3, v4, v5), with or without ROTATE_PC_PTR: this GPU's
-    * parameter cache is GFX10.1's, which upstream RADV does not report
-    * VK_KHR_fragment_shader_barycentric for (the RADV smoke title's
-    * barycentric pair; dEQP-VK.fragment_shading_barycentric.data, triangles). */
-   info->has_ps_strict_vertex_order = false;
-   /* A triangle over a 256x256 target drawn at a 2x2 pipeline shading rate
-    * ran its fragment shader 65536 times, once a texel, and every invocation
-    * read gl_ShadingRateEXT as 1x1 (the RADV smoke title's shading-rate
-    * check); dEQP-VK.fragment_shading_rate failed every case whose combined
-    * rate is coarser than 1x1, from the pipeline, the primitive or an
-    * attachment. The rasterizer is GFX10.1's, without variable-rate shading,
-    * so VK_KHR_fragment_shading_rate is not reported. */
-   info->has_vrs = false;
-   info->rbplus_allowed = false;
-   /* A depth-only image cleared to 0 read back 1 after a draw whose
-    * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
-    * with RADV_DEBUG=nohiz or nofastclears it passed): the TC-compatible
-    * HTILE clear bug Mesa records for GFX8 and GFX1013 (the BC-250, whose
-    * missing dot products this GPU shares too). This turns on its
-    * workaround, ZRANGE_PRECISION 0 after a clear to 0. */
-   info->has_htile_tc_z_clear_bug_without_stencil = true;
-   info->has_htile_tc_z_clear_bug_with_stencil = true;
    info->has_dedicated_vram = true;
    info->all_vram_visible = true;
    info->address32_hi = RADV_PS5_ADDRESS32_HI;
@@ -313,12 +349,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
     * made visible to the GPU is a probe still to run. */
    info->has_userptr = false;
-   /* The shaders are GFX10.3's but the colour block renders E5B9G9R9 wrong:
-    * every blit into it with a non-zero colour read back incorrect
-    * (dEQP-VK.api.copy_and_blit.*.blit_image.all_formats.color.*.
-    * e5b9g9r9_ufloat_pack32, 500 cases), while the zero colours of an
-    * a8_unorm source passed. */
-   info->has_rgb9e5_color_target = false;
    info->max_submitted_ibs[AMD_IP_GFX] = 1;
 
    /* ac_query_gpu_info's own derivations, which have no kernel input. */
