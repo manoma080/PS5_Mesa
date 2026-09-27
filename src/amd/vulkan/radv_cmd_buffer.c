@@ -6661,6 +6661,30 @@ radv_upload_push_constants(struct radv_cmd_buffer *cmd_buffer, const struct radv
    *va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
 }
 
+/* Shader objects run a geometry shader as compute when the geometry object
+ * has its passes and the vertex object its vertex pass, with no tessellation
+ * between them: their set, assembled in the command buffer's state. */
+static const struct radv_gs_compute_pipeline *
+radv_gs_compute_objects(struct radv_cmd_buffer *cmd_buffer)
+{
+   struct radv_cmd_state *state = &cmd_buffer->state;
+   const struct radv_shader_object *gs = state->shader_objs[MESA_SHADER_GEOMETRY];
+   const struct radv_shader_object *vs = state->shader_objs[MESA_SHADER_VERTEX];
+
+   if (!gs || !gs->gs_compute.gs || !vs || !vs->gs_compute.vs || state->shader_objs[MESA_SHADER_TESS_CTRL] ||
+       state->shader_objs[MESA_SHADER_TESS_EVAL])
+      return NULL;
+
+   struct radv_gs_compute_pipeline *gsc = &state->gs_compute_objects;
+   *gsc = *gs->gs_compute.gs;
+   gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = NULL;
+   gsc->deferred_vs = vs->gs_compute.vs;
+   gsc->vs_outputs = vs->gs_compute.vs_outputs;
+   return gsc;
+}
+
+static const struct radv_gs_compute_pipeline *radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer);
+
 static void
 radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stages, VkPipelineBindPoint bind_point)
 {
@@ -6675,8 +6699,7 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
       /* A geometry shader run as compute has no hardware stage: its
        * rasterization copy, which runs the shader again, is the vertex stage's
        * (the passes take their constants at each draw). */
-      const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
-      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && pipeline && pipeline->base.gs_compute)
+      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && radv_gs_compute_bound(cmd_buffer))
          internal_stages |= VK_SHADER_STAGE_VERTEX_BIT;
       break;
    }
@@ -13658,6 +13681,7 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
    bool need_dynamic_descriptors_offset_addr = false;
    bool need_indirect_descriptors = false;
    bool need_push_constants_upload = false;
+   const struct radv_gs_compute_pipeline *gs_compute = radv_gs_compute_objects(cmd_buffer);
 
    for (unsigned s = 0; s <= MESA_SHADER_MESH; s++) {
       const struct radv_shader_object *shader_obj = cmd_buffer->state.shader_objs[s];
@@ -13671,8 +13695,18 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
          continue;
       }
 
+      /* A geometry shader run as compute has no hardware stage: its
+       * rasterization copy is the vertex stage's. */
+      if (gs_compute && s == MESA_SHADER_GEOMETRY) {
+         radv_bind_shader(cmd_buffer, NULL, s);
+         dynamic_offset_count += shader_obj->dynamic_offset_count;
+         continue;
+      }
+
       /* Select shader variants. */
-      if (s == MESA_SHADER_VERTEX && (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL] ||
+      if (gs_compute && s == MESA_SHADER_VERTEX) {
+         shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]->gs_compute.rast;
+      } else if (s == MESA_SHADER_VERTEX && (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL] ||
                                       cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY])) {
          if (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL]) {
             shader = shader_obj->as_ls.shader;
@@ -13697,7 +13731,27 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
       dynamic_offset_count += shader_obj->dynamic_offset_count;
    }
 
-   struct radv_shader *gs_copy_shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]
+   /* The compute passes and the vertex object's own code take constants and
+    * descriptors too. */
+   if (gs_compute) {
+      const struct radv_shader_object *vs_obj = cmd_buffer->state.shader_objs[MESA_SHADER_VERTEX];
+      const struct radv_shader *const extra[] = {
+         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)],
+         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)],
+         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)],
+         vs_obj->as_es.shader ? vs_obj->as_es.shader : vs_obj->shader,
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(extra); i++) {
+         if (!extra[i])
+            continue;
+         need_indirect_descriptors |= radv_shader_need_indirect_descriptors(extra[i]);
+         need_dynamic_descriptors_offset_addr |= radv_shader_need_dynamic_descriptors_offset_addr(extra[i]);
+         need_push_constants_upload |= radv_shader_need_push_constants_upload(extra[i]);
+         push_constant_size = MAX2(push_constant_size, extra[i]->info.push_constant_size);
+      }
+   }
+
+   struct radv_shader *gs_copy_shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY] && !gs_compute
                                            ? cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]->gs.copy_shader
                                            : NULL;
 
@@ -14548,7 +14602,7 @@ static const struct radv_gs_compute_pipeline *
 radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer)
 {
    const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
-   return pipeline ? pipeline->base.gs_compute : NULL;
+   return pipeline ? pipeline->base.gs_compute : radv_gs_compute_objects(cmd_buffer);
 }
 
 /* A draw whose counts the CPU knows. Returns false when the bound pipeline
