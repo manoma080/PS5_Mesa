@@ -1069,6 +1069,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->has_gpu_written_ibs = true;
    info->has_perf_counters = true;
    info->has_ps_strict_vertex_order = info->gfx_level >= GFX10_3;
+   info->has_vrs = info->gfx_level >= GFX10_3;
    info->has_syncobj = true;
    info->has_fence_to_handle = true;
 
@@ -2071,6 +2072,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
    fprintf(f, "    has_perf_counters = %i\n", info->has_perf_counters);
    fprintf(f, "    has_ps_strict_vertex_order = %i\n", info->has_ps_strict_vertex_order);
+   fprintf(f, "    has_vrs = %i\n", info->has_vrs);
    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);

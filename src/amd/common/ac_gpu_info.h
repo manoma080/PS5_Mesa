@@ -393,6 +393,9 @@ struct radeon_info {
     * for per-vertex fragment inputs (SPI_PS_INPUT_CNTL.ROTATE_PC_PTR, GFX10.3+):
     * VK_KHR_fragment_shader_barycentric needs it. */
    bool has_ps_strict_vertex_order;
+   /* Whether the rasterizer shades at a coarse fragment size (PA_CL_VRS_CNTL,
+    * GFX10.3+): VK_KHR_fragment_shading_rate needs it. */
+   bool has_vrs;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

@@ -271,6 +271,14 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * VK_KHR_fragment_shader_barycentric for (the RADV smoke title's
     * barycentric pair; dEQP-VK.fragment_shading_barycentric.data, triangles). */
    info->has_ps_strict_vertex_order = false;
+   /* A triangle over a 256x256 target drawn at a 2x2 pipeline shading rate
+    * ran its fragment shader 65536 times, once a texel, and every invocation
+    * read gl_ShadingRateEXT as 1x1 (the RADV smoke title's shading-rate
+    * check); dEQP-VK.fragment_shading_rate failed every case whose combined
+    * rate is coarser than 1x1, from the pipeline, the primitive or an
+    * attachment. The rasterizer is GFX10.1's, without variable-rate shading,
+    * so VK_KHR_fragment_shading_rate is not reported. */
+   info->has_vrs = false;
    info->rbplus_allowed = false;
    /* A depth-only image cleared to 0 read back 1 after a draw whose
     * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;

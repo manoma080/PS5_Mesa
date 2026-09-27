@@ -168,7 +168,7 @@ radv_graphics_queue_enabled(const struct radv_physical_device *pdev)
 static bool
 radv_vrs_attachment_enabled(const struct radv_physical_device *pdev)
 {
-   return pdev->info.gfx_level >= GFX11 || pdev->use_hiz;
+   return pdev->info.has_vrs && (pdev->info.gfx_level >= GFX11 || pdev->use_hiz);
 }
 
 static bool
@@ -745,7 +745,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_external_semaphore_fd = pdev->has_external_fd,
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.has_ps_strict_vertex_order,
-      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
+      .KHR_fragment_shading_rate = pdev->info.has_vrs,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
       .KHR_image_format_list = true,
@@ -1268,8 +1268,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .mutableDescriptorType = true,
 
       /* VK_KHR_fragment_shading_rate */
-      .pipelineFragmentShadingRate = true,
-      .primitiveFragmentShadingRate = true,
+      .pipelineFragmentShadingRate = pdev->info.has_vrs,
+      .primitiveFragmentShadingRate = pdev->info.has_vrs,
       .attachmentFragmentShadingRate = radv_vrs_attachment_enabled(pdev),
 
       /* VK_KHR_workgroup_memory_explicit_layout */
@@ -1370,7 +1370,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .meshShader = taskmesh_en,
       .taskShader = taskmesh_en,
       .multiviewMeshShader = taskmesh_en,
-      .primitiveFragmentShadingRateMeshShader = taskmesh_en,
+      .primitiveFragmentShadingRateMeshShader = taskmesh_en && pdev->info.has_vrs,
       .meshShaderQueries = false,
 
       /* VK_EXT_depth_clip_control */
