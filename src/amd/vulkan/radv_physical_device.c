@@ -2328,7 +2328,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
 
       /* VK_EXT_map_memory_placed */
-      .minPlacedMemoryMapAlignment = os_page_size,
+      /* The kernel maps whole pages, which may be larger than the CPU's. */
+      .minPlacedMemoryMapAlignment = MAX2(os_page_size, pdev->info.gart_page_size),
 
       /* VK_EXT_nested_command_buffer */
       .maxCommandBufferNestingLevel = UINT32_MAX,
@@ -2438,12 +2439,18 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    snprintf(p->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "Mesa " PACKAGE_VERSION MESA_GIT_SHA1 "%s",
             radv_get_compiler_string(pdev));
 
+#ifdef RADV_PS5
+   /* No CTS release has passed on the PS5 yet (PS5_Vulkan CTS_GAPS.md): the
+    * version stays 0.0.0.0 until one does. */
+   p->conformanceVersion = (VkConformanceVersion){0};
+#else
    p->conformanceVersion = (VkConformanceVersion){
       .major = 1,
       .minor = 4,
       .subminor = 5,
       .patch = 3,
    };
+#endif
 
    /* VK_EXT_host_image_copy */
    static const VkImageLayout supported_layouts[] = {
@@ -3024,8 +3031,9 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
    idx = 0;
    if (radv_graphics_queue_enabled(pdev)) {
       if (*pCount >= 1) {
-         VkQueueFlags gfx_flags =
-            VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
+         /* Sparse binding only where sparse memory is supported. */
+         VkQueueFlags gfx_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT |
+                                  (pdev->info.has_sparse ? VK_QUEUE_SPARSE_BINDING_BIT : 0);
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = gfx_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_GENERAL),
             .queueCount = 1,
@@ -3037,7 +3045,8 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
    }
 
    if (radv_compute_queue_enabled(pdev)) {
-      VkQueueFlags compute_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
+      VkQueueFlags compute_flags =
+         VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | (pdev->info.has_sparse ? VK_QUEUE_SPARSE_BINDING_BIT : 0);
       if (*pCount > idx) {
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_COMPUTE),

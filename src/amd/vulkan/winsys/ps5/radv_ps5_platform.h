@@ -75,6 +75,12 @@ int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, 
 /* The tessellation factor ring the GPU uses from the next submission on (AGC
  * owns its registers); 0 or the system software's error. */
 int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);
+
+/* Maps memory's direct memory a second time for the CPU, at address, replacing
+ * whatever the range held (a placed mapping). */
+bool radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address);
+/* Undoes it, leaving the range reserved if reserve is set. */
+void radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve);
 /* VGT_HS_OFFCHIP_PARAM's fields for the next submissions (AGC owns it too);
  * 0 or the system software's error. */
 int radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering);

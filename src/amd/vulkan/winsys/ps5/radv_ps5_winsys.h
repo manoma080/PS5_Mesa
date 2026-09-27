@@ -94,6 +94,9 @@ struct radv_ps5_bo {
    struct radv_ps5_memory memory;
    enum radeon_bo_flag flags;
    struct radeon_bo_metadata metadata;
+   /* A second CPU mapping at an address the application chose
+    * (VK_EXT_map_memory_placed), or NULL. */
+   void *placed;
 };
 
 static inline struct radv_ps5_bo *

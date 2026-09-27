@@ -90,6 +90,8 @@ radv_ps5_buffer_destroy(struct radeon_winsys *rws, struct radeon_winsys_bo *base
       p_atomic_add(&ws->allocated_vram, -(int64_t)bo->memory.bytes);
    else
       p_atomic_add(&ws->allocated_gtt, -(int64_t)bo->memory.bytes);
+   if (bo->placed)
+      radv_ps5_memory_unmap_at(bo->placed, bo->memory.bytes, false);
    radv_ps5_memory_free(&bo->memory);
    free(bo);
 }
@@ -98,19 +100,29 @@ static void *
 radv_ps5_buffer_map(struct radeon_winsys *rws, struct radeon_winsys_bo *base, bool use_fixed_addr, void *fixed_addr)
 {
    (void)rws;
-   /* A placed mapping would need a second CPU mapping of the memory. */
-   if (use_fixed_addr)
+   struct radv_ps5_bo *const bo = radv_ps5_bo(base);
+   if (!use_fixed_addr)
+      return bo->memory.cpu;
+
+   /* A placed mapping (VK_EXT_map_memory_placed): the same direct memory mapped
+    * again for the CPU, at the address the application chose. The GPU keeps
+    * the first mapping's address. */
+   if (bo->placed || !radv_ps5_memory_map_at(&bo->memory, fixed_addr))
       return NULL;
-   (void)fixed_addr;
-   return radv_ps5_bo(base)->memory.cpu;
+   bo->placed = fixed_addr;
+   return fixed_addr;
 }
 
 static void
 radv_ps5_buffer_unmap(struct radeon_winsys *rws, struct radeon_winsys_bo *base, bool replace)
 {
    (void)rws;
-   (void)base;
-   (void)replace;
+   struct radv_ps5_bo *const bo = radv_ps5_bo(base);
+   /* The first mapping lasts as long as the buffer; only a placed one goes. */
+   if (!bo->placed)
+      return;
+   radv_ps5_memory_unmap_at(bo->placed, bo->memory.bytes, replace);
+   bo->placed = NULL;
 }
 
 static VkResult

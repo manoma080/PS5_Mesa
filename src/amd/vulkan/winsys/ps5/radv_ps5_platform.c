@@ -303,6 +303,34 @@ radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
    return sceAgcDriverSetHsOffchipParam(granularity, buffering);
 }
 
+bool
+radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
+{
+   if (memory->physical < 0)
+      return false;
+   void *at = address;
+   const int32_t result = sceKernelMapDirectMemory(&at, memory->bytes, PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE,
+                                                   PS5_KERNEL_MAP_FIXED, memory->physical, PS5_KERNEL_PAGE_SIZE);
+   if (result == 0 && at != address) {
+      sceKernelMunmap(at, memory->bytes);
+      return false;
+   }
+   return result == 0;
+}
+
+void
+radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
+{
+   if (reserve) {
+      /* A reservation laid over the mapping replaces it, as a fixed mapping does. */
+      void *at = address;
+      if (sceKernelReserveVirtualRange(&at, bytes, PS5_KERNEL_MAP_FIXED, PS5_KERNEL_PAGE_SIZE) == 0 && at == address)
+         return;
+      fprintf(stderr, "radv/ps5: a placed mapping at %p could not be left reserved\n", address);
+   }
+   sceKernelMunmap(address, bytes);
+}
+
 #else
 
 /* --------------------------------------------------------------- host model */
@@ -421,6 +449,23 @@ radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
    (void)granularity;
    (void)buffering;
    return 0;
+}
+
+bool
+radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
+{
+   /* The host model's memory is anonymous: nothing maps it twice. */
+   (void)memory;
+   (void)address;
+   return false;
+}
+
+void
+radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
+{
+   (void)address;
+   (void)bytes;
+   (void)reserve;
 }
 
 #endif
