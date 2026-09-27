@@ -187,6 +187,17 @@ radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMem
 static VkResult
 radv_queue_submit_bind_sparse_memory(struct radv_device *device, struct vk_queue_submit *submission)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   /* Where a bind changes the mappings at once, the work the waits stand for
+    * must be done with the old ones first. */
+   if (pdev->info.has_sparse_cpu_binds && submission->wait_count &&
+       (submission->buffer_bind_count || submission->image_opaque_bind_count || submission->image_bind_count)) {
+      VkResult result = vk_sync_wait_many(&device->vk, submission->wait_count, submission->waits, 0, UINT64_MAX);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
    for (uint32_t i = 0; i < submission->buffer_bind_count; ++i) {
       VkResult result = radv_sparse_buffer_bind_memory(device, submission->buffer_binds + i);
       if (result != VK_SUCCESS)

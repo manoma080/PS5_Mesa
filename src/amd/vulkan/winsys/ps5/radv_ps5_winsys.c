@@ -336,7 +336,16 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * (vk_sync_timeline), with threaded submission for waits before signals. */
    info->has_timeline_syncobj = true;
    info->kernel_has_modifiers = false;
-   info->has_sparse = false;
+   /* Sparse resources are ranges of the device-memory region whose pages the
+    * winsys maps to buffers as they are bound, and to a shared zero block
+    * while they are not (radv_ps5_vrange_*). No exported function sets the
+    * page table's PRT bits, so an unbound page is not known to read zero or
+    * to report itself non-resident; and a bind is a mapping change made at
+    * once, after the submission's waits. */
+   info->has_sparse = true;
+   info->has_sparse_prt = false;
+   info->has_sparse_cpu_binds = true;
+   info->max_sparse_va_bytes = radv_ps5_vrange_space_bytes();
    /* A captured buffer can be placed at its address again
     * (radv_ps5_memory_alloc_replayable); before that, every replay case of
     * dEQP-VK.binding_model.buffer_device_address (723) failed. Outside the

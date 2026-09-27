@@ -1092,6 +1092,9 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
     * Enable them when these are investigated and fixed in the driver.
     */
    info->has_sparse = info->family >= CHIP_POLARIS10;
+   info->has_sparse_prt = info->has_sparse;
+   info->has_sparse_cpu_binds = false;
+   info->max_sparse_va_bytes = UINT64_MAX;
    info->has_sparse_image_3d = info->gfx_level >= GFX7;
    info->has_sparse_image_standard_3d = info->gfx_level >= GFX9;
    info->has_sparse_unaligned_mip_size = info->gfx_level >= GFX7;

@@ -412,6 +412,15 @@ struct radeon_info {
    bool has_eqaa_surface_allocator;
    /* Sparse bindings and basic sparse features (2D image, etc.) */
    bool has_sparse;
+   /* Whether an unbound sparse page reads zeros and a shader can tell it is
+    * not resident (PRT page table entries): residencyNonResidentStrict and
+    * shaderResourceResidency need it. */
+   bool has_sparse_prt;
+   /* Whether a sparse bind takes effect the moment the winsys makes it (a CPU
+    * mapping change), so it must wait for the submission's waits first. */
+   bool has_sparse_cpu_binds;
+   /* How much address space sparse resources can take in all. */
+   uint64_t max_sparse_va_bytes;
    /* 3D sparse images */
    bool has_sparse_image_3d;
    /* 3D sparse images with standard block shape */

@@ -100,6 +100,9 @@ struct radv_ps5_bo {
    /* A second CPU mapping at an address the application chose
     * (VK_EXT_map_memory_placed), or NULL. */
    void *placed;
+   /* A sparse resource's range (RADEON_FLAG_VIRTUAL): memory is the reserved
+    * range, and buffers are bound into it. */
+   bool sparse;
 };
 
 static inline struct radv_ps5_bo *

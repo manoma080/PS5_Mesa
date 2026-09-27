@@ -387,6 +387,121 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
    return true;
 }
 
+/* ------------------------------------------------------------ sparse ranges */
+
+/* A sparse resource is a range of the device-memory region. A bound piece is
+ * a buffer's direct memory mapped there at a fixed address; an unbound piece
+ * is the shared zero block, so an access to it neither faults nor reaches any
+ * buffer. What such a read returns is whatever was written there before,
+ * which Vulkan allows without residencyNonResidentStrict. */
+static simple_mtx_t radv_ps5_zero_lock = SIMPLE_MTX_INITIALIZER;
+static int64_t radv_ps5_zero_physical = -1;
+
+static int64_t
+radv_ps5_zero_block(void)
+{
+   simple_mtx_lock(&radv_ps5_zero_lock);
+   if (radv_ps5_zero_physical < 0) {
+      int64_t physical = -1;
+      if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), RADV_PS5_LARGE_BYTES,
+                                        RADV_PS5_LARGE_BYTES, RADV_PS5_DIRECT_TYPE, &physical) == 0) {
+         void *cpu = NULL;
+         if (sceKernelMapDirectMemory(&cpu, RADV_PS5_LARGE_BYTES, RADV_PS5_PROTECTION, 0, physical,
+                                      RADV_PS5_LARGE_BYTES) == 0) {
+            memset(cpu, 0, RADV_PS5_LARGE_BYTES);
+            radv_ps5_cpu_flush(cpu, RADV_PS5_LARGE_BYTES);
+            sceKernelMunmap(cpu, RADV_PS5_LARGE_BYTES);
+            radv_ps5_zero_physical = physical;
+         } else {
+            sceKernelReleaseDirectMemory(physical, RADV_PS5_LARGE_BYTES);
+         }
+      }
+   }
+   const int64_t zero = radv_ps5_zero_physical;
+   simple_mtx_unlock(&radv_ps5_zero_lock);
+   return zero;
+}
+
+static bool
+radv_ps5_map_fixed(uint8_t *at, uint64_t bytes, int64_t physical)
+{
+   void *address = at;
+   return sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, PS5_KERNEL_MAP_FIXED, physical,
+                                   RADV_PS5_PAGE_BYTES) == 0 &&
+          address == at;
+}
+
+bool
+radv_ps5_vrange_unbind(void *at, uint64_t bytes)
+{
+   const int64_t zero = radv_ps5_zero_block();
+   if (zero < 0 || (uintptr_t)at % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
+      return false;
+   for (uint64_t done = 0; done < bytes;) {
+      const uint64_t piece = MIN2(bytes - done, RADV_PS5_LARGE_BYTES);
+      if (!radv_ps5_map_fixed((uint8_t *)at + done, piece, zero))
+         return false;
+      done += piece;
+   }
+   return true;
+}
+
+bool
+radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset)
+{
+   if (memory->physical < 0 || offset > memory->bytes || bytes > memory->bytes - offset ||
+       (uintptr_t)at % RADV_PS5_PAGE_BYTES || offset % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
+      return false;
+   return radv_ps5_map_fixed(at, bytes, memory->physical + (int64_t)offset);
+}
+
+bool
+radv_ps5_vrange_reserve(uint64_t bytes, bool replayable, uint64_t replay_va, struct radv_ps5_memory *out)
+{
+   *out = (struct radv_ps5_memory){.physical = -1};
+   const uint32_t granules = (uint32_t)DIV_ROUND_UP(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
+   /* Placed as radv_ps5_memory_alloc_replayable places buffers. */
+   uint32_t granule;
+   if (replay_va) {
+      if (replay_va < RADV_PS5_REGION_BASE || (replay_va - RADV_PS5_REGION_BASE) % RADV_PS5_LARGE_BYTES ||
+          (replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES > UINT32_MAX)
+         return false;
+      granule = (uint32_t)((replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES);
+      if (!radv_ps5_granules_take_at(&radv_ps5_region, granule, granules))
+         return false;
+   } else {
+      granule = replayable ? radv_ps5_granules_take_top(&radv_ps5_region, granules, 1)
+                           : radv_ps5_granules_take(&radv_ps5_region, granules, 1);
+      if (granule == UINT32_MAX)
+         return false;
+   }
+   uint8_t *const va = (uint8_t *)(uintptr_t)(RADV_PS5_REGION_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
+   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
+   if (!radv_ps5_vrange_unbind(va, span)) {
+      sceKernelMunmap(va, span);
+      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
+      return false;
+   }
+   *out = (struct radv_ps5_memory){.cpu = va, .bytes = span, .physical = -1, .granule = granule, .granules = granules};
+   return true;
+}
+
+void
+radv_ps5_vrange_release(struct radv_ps5_memory *range)
+{
+   if (!range->cpu)
+      return;
+   sceKernelMunmap(range->cpu, range->bytes);
+   radv_ps5_granules_give(&radv_ps5_region, range->granule, range->granules);
+   *range = (struct radv_ps5_memory){.physical = -1};
+}
+
+uint64_t
+radv_ps5_vrange_space_bytes(void)
+{
+   return RADV_PS5_REGION_BYTES;
+}
+
 void
 radv_ps5_memory_free(struct radv_ps5_memory *memory)
 {
@@ -575,6 +690,43 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
    }
    *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
    return true;
+}
+
+/* Sparse ranges in the model: plain memory, which binds leave alone (the
+ * model runs no GPU work to read through them). */
+bool
+radv_ps5_vrange_reserve(uint64_t bytes, bool replayable, uint64_t replay_va, struct radv_ps5_memory *out)
+{
+   const uint64_t span = align64(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
+   return replayable ? radv_ps5_memory_alloc_replayable(span, RADV_PS5_LARGE_BYTES, false, replay_va, out)
+                     : radv_ps5_memory_alloc(span, RADV_PS5_LARGE_BYTES, false, out);
+}
+
+void
+radv_ps5_vrange_release(struct radv_ps5_memory *range)
+{
+   radv_ps5_memory_free(range);
+}
+
+bool
+radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset)
+{
+   (void)at;
+   return offset <= memory->bytes && bytes <= memory->bytes - offset;
+}
+
+bool
+radv_ps5_vrange_unbind(void *at, uint64_t bytes)
+{
+   (void)at;
+   (void)bytes;
+   return true;
+}
+
+uint64_t
+radv_ps5_vrange_space_bytes(void)
+{
+   return UINT64_C(256) << 30;
 }
 
 void

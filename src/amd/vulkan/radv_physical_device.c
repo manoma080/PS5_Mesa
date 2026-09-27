@@ -1070,7 +1070,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .sparseResidencyAliased = enable_sparse,
       .variableMultisampleRate = true,
       .shaderResourceMinLod = enable_sparse,
-      .shaderResourceResidency = enable_sparse,
+      .shaderResourceResidency = enable_sparse && pdev->info.has_sparse_prt,
       .inheritedQueries = true,
 
       /* Vulkan 1.1 */
@@ -1846,7 +1846,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxMemoryAllocationCount = UINT32_MAX,
       .maxSamplerAllocationCount = 64 * 1024,
       .bufferImageGranularity = 1,
-      .sparseAddressSpaceSize = enable_sparse ? pdev->info.virtual_address_max : 0,
+      .sparseAddressSpaceSize =
+         enable_sparse ? MIN2(pdev->info.virtual_address_max, pdev->info.max_sparse_va_bytes) : 0,
       .maxBoundDescriptorSets = MAX_SETS,
       .maxPerStageDescriptorSamplers = max_descriptor_set_size,
       .maxPerStageDescriptorUniformBuffers = max_descriptor_set_size,
@@ -1940,7 +1941,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .optimalBufferCopyOffsetAlignment = 1,
       .optimalBufferCopyRowPitchAlignment = 1,
       .nonCoherentAtomSize = 64,
-      .sparseResidencyNonResidentStrict = enable_sparse,
+      .sparseResidencyNonResidentStrict = enable_sparse && pdev->info.has_sparse_prt,
       .sparseResidencyAlignedMipSize = enable_sparse && !pdev->info.has_sparse_unaligned_mip_size,
       .sparseResidencyStandard2DBlockShape = enable_sparse,
       .sparseResidencyStandard3DBlockShape = enable_sparse && pdev->info.has_sparse_image_standard_3d,

@@ -6,6 +6,7 @@
 
 #include "radv_ps5_winsys.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,10 +35,29 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
    struct radv_ps5_winsys *const ws = radv_ps5_winsys(rws);
    *out_bo = NULL;
 
-   /* Sparse buffers need page-table control a title does not have; the
-    * physical device reports none (has_sparse_vm_mappings). */
-   if (flags & RADEON_FLAG_VIRTUAL)
-      return VK_ERROR_FEATURE_NOT_PRESENT;
+   /* A sparse resource: a range with nothing bound yet (radv_ps5_vrange_*),
+    * placed for capture and replay as any other buffer is. */
+   if (flags & RADEON_FLAG_VIRTUAL) {
+      struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
+      if (!bo)
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      if (!radv_ps5_vrange_reserve(size, (flags & RADEON_FLAG_REPLAYABLE) || replay_address, replay_address,
+                                   &bo->memory)) {
+         free(bo);
+         return replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
+      bo->ws = ws;
+      bo->flags = flags;
+      bo->sparse = true;
+      bo->base.va = (uint64_t)(uintptr_t)bo->memory.cpu;
+      bo->base.size = size;
+      bo->base.is_local = true;
+      bo->base.use_global_list = true;
+      bo->base.initial_domain = domain;
+      bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
+      *out_bo = &bo->base;
+      return VK_SUCCESS;
+   }
    /* Capture and replay: a captured buffer outside the window goes at the top
     * of the device-memory region, and a replayed one at its captured address
     * or nowhere (radv_ps5_memory_alloc_replayable). */
@@ -88,6 +108,11 @@ radv_ps5_buffer_destroy(struct radeon_winsys *rws, struct radeon_winsys_bo *base
    struct radv_ps5_bo *const bo = radv_ps5_bo(base);
    if (!bo)
       return;
+   if (bo->sparse) {
+      radv_ps5_vrange_release(&bo->memory);
+      free(bo);
+      return;
+   }
    p_atomic_add(&radv_ps5_allocated_bytes, -(int64_t)bo->memory.bytes);
    if (bo->base.initial_domain & RADEON_DOMAIN_VRAM)
       p_atomic_add(&ws->allocated_vram, -(int64_t)bo->memory.bytes);
@@ -104,6 +129,8 @@ radv_ps5_buffer_map(struct radeon_winsys *rws, struct radeon_winsys_bo *base, bo
 {
    (void)rws;
    struct radv_ps5_bo *const bo = radv_ps5_bo(base);
+   if (bo->sparse)
+      return NULL;
    if (!use_fixed_addr)
       return bo->memory.cpu;
 
@@ -191,12 +218,16 @@ radv_ps5_buffer_virtual_bind(struct radeon_winsys *rws, struct radeon_winsys_bo 
                              uint64_t size, struct radeon_winsys_bo *bo, uint64_t bo_offset)
 {
    (void)rws;
-   (void)parent;
-   (void)offset;
-   (void)size;
-   (void)bo;
-   (void)bo_offset;
-   return VK_ERROR_FEATURE_NOT_PRESENT;
+   struct radv_ps5_bo *const range = radv_ps5_bo(parent);
+   if (!range->sparse || offset > range->memory.bytes || size > range->memory.bytes - offset)
+      return VK_ERROR_UNKNOWN;
+   uint8_t *const at = (uint8_t *)range->memory.cpu + offset;
+   const bool done = bo ? radv_ps5_vrange_bind(at, size, &radv_ps5_bo(bo)->memory, bo_offset)
+                        : radv_ps5_vrange_unbind(at, size);
+   if (!done)
+      fprintf(stderr, "radv/ps5: sparse %s of %" PRIu64 " bytes at %p failed\n", bo ? "bind" : "unbind", size,
+              (void *)at);
+   return done ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
 }
 
 static VkResult
