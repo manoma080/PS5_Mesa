@@ -50,7 +50,8 @@ typedef void *drmDevicePtr;
 #include <llvm-c/TargetMachine.h>
 #endif
 
-#if defined(_WIN32) || defined(AMD_NO_DRM)
+/* The PS5 winsys reads the GPU clock through its queue (RADEON_TIMESTAMP). */
+#if defined(_WIN32) || (defined(AMD_NO_DRM) && !defined(RADV_PS5))
 #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 0
 #else
 #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 1

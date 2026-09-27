@@ -71,6 +71,9 @@ struct radv_ps5_queue {
 /* The process's queue, created by the first winsys; NULL if it cannot be. */
 struct radv_ps5_queue *radv_ps5_queue_get(void);
 
+/* The GPU's timestamp clock, read through the queue; 0 if it cannot be. */
+uint64_t radv_ps5_read_gpu_clock(void);
+
 struct radv_ps5_winsys {
    struct radeon_winsys base;
    struct radeon_info info;

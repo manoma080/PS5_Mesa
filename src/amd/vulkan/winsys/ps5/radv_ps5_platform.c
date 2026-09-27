@@ -598,7 +598,8 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
    (void)words;
    (void)count;
    /* Nothing runs the words on a PC; the submission completes at once. */
-   *marker = marker_value;
+   if (marker)
+      *marker = marker_value;
    return 0;
 }
 

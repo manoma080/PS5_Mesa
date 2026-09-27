@@ -407,8 +407,10 @@ radv_ps5_winsys_query_value(struct radeon_winsys *rws, enum radeon_value_id valu
    case RADEON_ALLOCATED_GTT:
    case RADEON_GTT_USAGE:
       return p_atomic_read(&ws->allocated_gtt);
+   case RADEON_TIMESTAMP:
+      return radv_ps5_read_gpu_clock();
    default:
-      /* The console's clocks and counters are not the title's to read. */
+      /* The console's other clocks and counters are not the title's to read. */
       return 0;
    }
 }

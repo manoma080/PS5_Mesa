@@ -333,6 +333,54 @@ radv_ps5_completion_words(uint32_t *words, uint64_t marker_address, uint32_t val
    words[7] = 0;
 }
 
+/* The GPU clock, as a timestamp query reads it: a RELEASE_MEM that writes the
+ * 64-bit 100 MHz counter at the bottom of the pipe (HARDWARE_FINDINGS.md in
+ * PS5_Vulkan, "A readable GPU clock"), submitted alone and waited for. It
+ * lands after whatever the queue still runs, which the caller's CPU clock
+ * readings around it (vkGetCalibratedTimestampsKHR's deviation) include. The
+ * packet and its value live in the marker's page, past the marker. */
+#define RADV_PS5_CLOCK_WORDS_OFFSET 1024
+#define RADV_PS5_CLOCK_VALUE_OFFSET 2048
+
+uint64_t
+radv_ps5_read_gpu_clock(void)
+{
+   /* The model runs no GPU: its clock is the host's, at the same rate. */
+   if (!radv_ps5_platform_runs_gpu())
+      return (uint64_t)os_time_get_nano() / 10;
+   struct radv_ps5_queue *const queue = radv_ps5_queue_get();
+   if (!queue)
+      return 0;
+   uint8_t *const page = (uint8_t *)queue->marker_memory.cpu;
+   uint32_t *const words = (uint32_t *)(page + RADV_PS5_CLOCK_WORDS_OFFSET);
+   volatile uint64_t *const value = (volatile uint64_t *)(page + RADV_PS5_CLOCK_VALUE_OFFSET);
+   const uint64_t va = (uint64_t)(uintptr_t)value;
+
+   simple_mtx_lock(&queue->submit_lock);
+   *value = UINT64_MAX;
+   radv_ps5_cpu_flush((const void *)value, sizeof(*value));
+   words[0] = PKT3(PKT3_RELEASE_MEM, 6, 0);
+   words[1] = EVENT_TYPE(V_028A90_BOTTOM_OF_PIPE_TS) | EVENT_INDEX(5);
+   words[2] = EOP_DATA_SEL(EOP_DATA_SEL_TIMESTAMP);
+   words[3] = (uint32_t)va;
+   words[4] = (uint32_t)(va >> 32);
+   words[5] = 0;
+   words[6] = 0;
+   words[7] = 0;
+   uint64_t clock = 0;
+   if (radv_ps5_submit(words, 8, NULL, 0) == 0) {
+      const int64_t deadline = os_time_get_nano() + INT64_C(1000000000);
+      do {
+         radv_ps5_cpu_flush((const void *)value, sizeof(*value));
+         clock = *value;
+      } while (clock == UINT64_MAX && os_time_get_nano() < deadline);
+      if (clock == UINT64_MAX)
+         clock = 0;
+   }
+   simple_mtx_unlock(&queue->submit_lock);
+   return clock;
+}
+
 /* Forgets the ring records the GPU has finished with. Called with the submit
  * lock held. */
 static void
