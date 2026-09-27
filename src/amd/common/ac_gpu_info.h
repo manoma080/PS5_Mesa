@@ -386,6 +386,10 @@ struct radeon_info {
    /* Whether performance counters can be programmed with the GPU held at a
     * stable power state: VK_KHR_performance_query needs both. */
    bool has_perf_counters;
+   /* Whether the SPI rotates the parameter cache to a primitive's vertex order
+    * for per-vertex fragment inputs (SPI_PS_INPUT_CNTL.ROTATE_PC_PTR, GFX10.3+):
+    * VK_KHR_fragment_shader_barycentric needs it. */
+   bool has_ps_strict_vertex_order;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;

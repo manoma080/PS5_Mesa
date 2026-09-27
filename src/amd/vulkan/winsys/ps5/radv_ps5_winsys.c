@@ -255,6 +255,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * lock VK_KHR_performance_query takes always failed
     * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
    info->has_perf_counters = false;
+   /* The second of two triangles read its per-vertex inputs rotated, (v5, v3,
+    * v4) for (v3, v4, v5), with or without ROTATE_PC_PTR: this GPU's
+    * parameter cache is GFX10.1's, which upstream RADV does not report
+    * VK_KHR_fragment_shader_barycentric for (the RADV smoke title's
+    * barycentric pair; dEQP-VK.fragment_shading_barycentric.data, triangles). */
+   info->has_ps_strict_vertex_order = false;
    info->rbplus_allowed = false;
    /* A depth-only image cleared to 0 read back 1 after a draw whose
     * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;

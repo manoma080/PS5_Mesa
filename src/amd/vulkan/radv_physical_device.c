@@ -744,7 +744,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_external_semaphore = true,
       .KHR_external_semaphore_fd = pdev->has_external_fd,
       .KHR_format_feature_flags2 = true,
-      .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
+      .KHR_fragment_shader_barycentric = pdev->info.has_ps_strict_vertex_order,
       .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
@@ -1465,7 +1465,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .dynamicRenderingUnusedAttachments = true,
 
       /* VK_KHR_fragment_shader_barycentric */
-      .fragmentShaderBarycentric = true,
+      .fragmentShaderBarycentric = pdev->info.has_ps_strict_vertex_order,
 
       /* VK_EXT_depth_bias_control */
       .depthBiasControl = true,
