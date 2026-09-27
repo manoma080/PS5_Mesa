@@ -1348,16 +1348,21 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
    else
       *gs_count = NULL;
 
-   /* Strip stores and atomics */
-   do {
-      progress = false;
-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
-               strip_side_effect_from_main, nir_metadata_control_flow,
-               (void *)true);
+   /* Strip stores and atomics: the count shader performs them. Without one,
+    * the counts are static and this shader is the only full run of the
+    * geometry shader, so it keeps them.
+    */
+   if (*gs_count) {
+      do {
+         progress = false;
+         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+                  strip_side_effect_from_main, nir_metadata_control_flow,
+                  (void *)true);
 
-      NIR_PASS(progress, gs, nir_opt_dce);
-      NIR_PASS(progress, gs, nir_opt_dead_cf);
-   } while (progress);
+         NIR_PASS(progress, gs, nir_opt_dce);
+         NIR_PASS(progress, gs, nir_opt_dead_cf);
+      } while (progress);
+   }
 
    NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_gs_instr,
             nir_metadata_none, &gs_state);
@@ -1381,15 +1386,17 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
    } while (progress);
 
    /* Strip remaining atomics, but not stores - since those are from us */
-   do {
-      progress = false;
-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
-               strip_side_effect_from_main, nir_metadata_control_flow,
-               (void *)false);
+   if (*gs_count) {
+      do {
+         progress = false;
+         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+                  strip_side_effect_from_main, nir_metadata_control_flow,
+                  (void *)false);
 
-      NIR_PASS(progress, gs, nir_opt_dce);
-      NIR_PASS(progress, gs, nir_opt_dead_cf);
-   } while (progress);
+         NIR_PASS(progress, gs, nir_opt_dce);
+         NIR_PASS(progress, gs, nir_opt_dead_cf);
+      } while (progress);
+   }
 
    /* All those variables we created should've gone away by now */
    NIR_PASS(_, gs, nir_remove_dead_variables, nir_var_function_temp, NULL);
