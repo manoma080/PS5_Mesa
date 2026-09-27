@@ -623,6 +623,19 @@ radv_ps5_platform_once(void)
                                            RADV_PS5_WINDOW_GRANULE);
 }
 
+/* The Vulkan loader may unload the driver once its instances are gone and load
+ * it again (the CTS does): the window goes with the library, or the next load
+ * finds it taken. */
+static void __attribute__((destructor))
+radv_ps5_platform_unload(void)
+{
+   if (!radv_ps5_ready)
+      return;
+   munmap((void *)(uintptr_t)RADV_PS5_WINDOW_BASE, RADV_PS5_WINDOW_BYTES);
+   free(radv_ps5_window.used);
+   simple_mtx_destroy(&radv_ps5_window.lock);
+}
+
 bool
 radv_ps5_platform_runs_gpu(void)
 {
