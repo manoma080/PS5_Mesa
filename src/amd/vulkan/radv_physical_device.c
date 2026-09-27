@@ -1128,7 +1128,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .hostQueryReset = true,
       .timelineSemaphore = pdev->info.has_timeline_syncobj,
       .bufferDeviceAddress = true,
-      .bufferDeviceAddressCaptureReplay = true,
+      .bufferDeviceAddressCaptureReplay = pdev->info.has_replayable_va,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -1292,7 +1292,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_acceleration_structure */
       .accelerationStructure = true,
-      .accelerationStructureCaptureReplay = true,
+      .accelerationStructureCaptureReplay = pdev->info.has_replayable_va,
       .accelerationStructureIndirectBuild = false,
       .accelerationStructureHostCommands = false,
       .descriptorBindingAccelerationStructureUpdateAfterBind = true,
@@ -1348,7 +1348,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_ray_tracing_pipeline */
       .rayTracingPipeline = radv_rt_pipelines_enabled(pdev),
-      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev),
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va,
       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
       .rayTracingPipelineTraceRaysIndirect = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
       .rayTraversalPrimitiveCulling = radv_rt_pipelines_enabled(pdev),
@@ -1443,7 +1443,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_descriptor_buffer */
       .descriptorBuffer = true,
-      .descriptorBufferCaptureReplay = true,
+      .descriptorBufferCaptureReplay = pdev->info.has_replayable_va,
       .descriptorBufferImageLayoutIgnored = true,
       .descriptorBufferPushDescriptors = true,
 
@@ -1668,7 +1668,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_descriptor_heap */
       .descriptorHeap = true,
-      .descriptorHeapCaptureReplay = true,
+      .descriptorHeapCaptureReplay = pdev->info.has_replayable_va,
 
       /* VK_KHR_shader_constant_data */
       .shaderConstantData = true,

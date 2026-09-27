@@ -396,6 +396,10 @@ struct radeon_info {
    /* Whether the rasterizer shades at a coarse fragment size (PA_CL_VRS_CNTL,
     * GFX10.3+): VK_KHR_fragment_shading_rate needs it. */
    bool has_vrs;
+   /* Whether a buffer can be placed at the GPU address an earlier allocation
+    * was given (RADEON_FLAG_REPLAYABLE with a replay address): every capture
+    * and replay feature needs it. */
+   bool has_replayable_va;
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;
