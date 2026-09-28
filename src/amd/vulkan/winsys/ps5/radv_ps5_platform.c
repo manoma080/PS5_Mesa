@@ -204,6 +204,38 @@ radv_ps5_window_contains(uint64_t address, uint64_t bytes)
 
 static int32_t radv_ps5_agc_result = -1;
 
+/* The top of the window, kept for the replayable window buffers (a ray tracing
+ * pipeline's shader arenas when group handles are captured): the kernel
+ * places every other window mapping, so an address captured among them may be
+ * taken when it is replayed. Here the port places them, captures from the top
+ * down and replays at their captured addresses; the range stays reserved
+ * where nothing is mapped. */
+#define RADV_PS5_WINDOW_REPLAY_BYTES (UINT64_C(256) << 20)
+#define RADV_PS5_WINDOW_REPLAY_BASE  (RADV_PS5_WINDOW_BASE + RADV_PS5_WINDOW_BYTES - RADV_PS5_WINDOW_REPLAY_BYTES)
+static struct radv_ps5_granules radv_ps5_window_replay;
+static bool radv_ps5_window_replay_ready;
+
+static void
+radv_ps5_window_replay_init(void)
+{
+   void *at = (void *)(uintptr_t)RADV_PS5_WINDOW_REPLAY_BASE;
+   if (sceKernelReserveVirtualRange(&at, RADV_PS5_WINDOW_REPLAY_BYTES, 0, RADV_PS5_LARGE_BYTES) != 0)
+      return;
+   if (at != (void *)(uintptr_t)RADV_PS5_WINDOW_REPLAY_BASE ||
+       !radv_ps5_granules_init(&radv_ps5_window_replay, RADV_PS5_WINDOW_REPLAY_BASE, RADV_PS5_WINDOW_REPLAY_BYTES,
+                               RADV_PS5_LARGE_BYTES)) {
+      sceKernelMunmap(at, RADV_PS5_WINDOW_REPLAY_BYTES);
+      return;
+   }
+   radv_ps5_window_replay_ready = true;
+}
+
+bool
+radv_ps5_window_replayable(void)
+{
+   return radv_ps5_window_replay_ready;
+}
+
 static void
 radv_ps5_platform_once(void)
 {
@@ -214,6 +246,8 @@ radv_ps5_platform_once(void)
    radv_ps5_ready = radv_ps5_agc_result == 0 &&
                     radv_ps5_granules_init(&radv_ps5_region, RADV_PS5_REGION_BASE, RADV_PS5_REGION_BYTES,
                                            RADV_PS5_LARGE_BYTES);
+   if (radv_ps5_ready)
+      radv_ps5_window_replay_init();
 }
 
 bool
@@ -305,9 +339,60 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct 
    return true;
 }
 
+static bool radv_ps5_map_fixed(uint8_t *at, uint64_t bytes, int64_t physical);
+
+/* A replayable window buffer, in the window's replay range: captured from its
+ * top, replayed at the captured address. */
+static bool
+radv_ps5_memory_alloc_window_replay(uint64_t bytes, uint64_t alignment, uint64_t replay_va,
+                                    struct radv_ps5_memory *out)
+{
+   if (!radv_ps5_window_replay_ready)
+      return false;
+   alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
+   const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
+   uint32_t granule;
+   if (replay_va) {
+      if (replay_va < RADV_PS5_WINDOW_REPLAY_BASE || (replay_va - RADV_PS5_WINDOW_BASE) % alignment ||
+          !radv_ps5_window_contains(replay_va, (uint64_t)granules * RADV_PS5_LARGE_BYTES))
+         return false;
+      granule = (uint32_t)((replay_va - RADV_PS5_WINDOW_REPLAY_BASE) / RADV_PS5_LARGE_BYTES);
+      if (!radv_ps5_granules_take_at(&radv_ps5_window_replay, granule, granules))
+         return false;
+   } else {
+      granule = radv_ps5_granules_take_top(&radv_ps5_window_replay, granules,
+                                           (uint32_t)(alignment / RADV_PS5_LARGE_BYTES));
+      if (granule == UINT32_MAX)
+         return false;
+   }
+
+   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
+   uint8_t *const at = (uint8_t *)(uintptr_t)(RADV_PS5_WINDOW_REPLAY_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
+   int64_t physical = -1;
+   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), span, RADV_PS5_LARGE_BYTES,
+                                     RADV_PS5_DIRECT_TYPE, &physical) != 0) {
+      radv_ps5_granules_give(&radv_ps5_window_replay, granule, granules);
+      return false;
+   }
+   if (!radv_ps5_map_fixed(at, span, physical)) {
+      sceKernelReleaseDirectMemory(physical, span);
+      radv_ps5_granules_give(&radv_ps5_window_replay, granule, granules);
+      return false;
+   }
+   *out = (struct radv_ps5_memory){
+      .cpu = at,
+      .bytes = span,
+      .physical = physical,
+      .granule = granule,
+      .granules = granules,
+      .window_replay = true,
+   };
+   return true;
+}
+
 /* A window buffer is replayed where the kernel agrees to put it: at the
  * captured address given as a hint, if nothing took it since. */
-static bool
+static UNUSED bool
 radv_ps5_memory_replay_window(uint64_t bytes, uint64_t alignment, uint64_t replay_va, struct radv_ps5_memory *out)
 {
    alignment = util_next_power_of_two64(MAX2(alignment, PS5_KERNEL_DIRECT_ALIGNMENT));
@@ -334,12 +419,10 @@ bool
 radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
                                  struct radv_ps5_memory *out)
 {
-   if (window32 && !replay_va)
-      return radv_ps5_memory_alloc(bytes, alignment, true, out);
    *out = (struct radv_ps5_memory){.physical = -1};
    bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
    if (window32)
-      return radv_ps5_memory_replay_window(bytes, alignment, replay_va, out);
+      return radv_ps5_memory_alloc_window_replay(bytes, alignment, replay_va, out);
    alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
    const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
    const uint32_t align_granules = (uint32_t)(alignment / RADV_PS5_LARGE_BYTES);
@@ -531,6 +614,18 @@ radv_ps5_memory_free(struct radv_ps5_memory *memory)
 {
    if (!memory->cpu)
       return;
+   if (memory->window_replay) {
+      /* Back to a reservation, for the next capture or replay. */
+      void *at = memory->cpu;
+      if (sceKernelReserveVirtualRange(&at, memory->bytes, PS5_KERNEL_MAP_FIXED, RADV_PS5_PAGE_BYTES) != 0 ||
+          at != memory->cpu)
+         fprintf(stderr, "radv/ps5: the window's replay range at %p could not be reserved again\n",
+                 (void *)memory->cpu);
+      radv_ps5_granules_give(&radv_ps5_window_replay, memory->granule, memory->granules);
+      sceKernelReleaseDirectMemory(memory->physical, memory->bytes);
+      *memory = (struct radv_ps5_memory){.physical = -1};
+      return;
+   }
    const int32_t unmapped = sceKernelMunmap(memory->cpu, memory->bytes);
    if (unmapped != 0)
       fprintf(stderr, "radv/ps5: sceKernelMunmap(%p, %" PRIu64 ") failed: 0x%08x\n", (void *)memory->cpu,
@@ -736,6 +831,13 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
       return false;
    }
    *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
+   return true;
+}
+
+/* The model places every window buffer itself (radv_ps5_window). */
+bool
+radv_ps5_window_replayable(void)
+{
    return true;
 }
 

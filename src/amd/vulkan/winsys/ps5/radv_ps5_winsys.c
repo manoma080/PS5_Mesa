@@ -374,11 +374,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * (radv_ps5_memory_alloc_replayable); before that, every replay case of
     * dEQP-VK.binding_model.buffer_device_address (723) failed. Outside the
     * shaders' window captures keep clear of every other buffer; in it the
-    * kernel places buffers, so a replay there holds only if nothing took the
-    * address since, which the ray tracing pipelines' shader handles (whole
-    * shader arenas) cannot count on. */
+    * kernel places buffers, so replayable ones (the ray tracing pipelines'
+    * shader arenas, whose group handles are captured) go in a range at its
+    * top the port keeps for them (radv_ps5_window_replayable). */
    info->has_replayable_va = true;
-   info->has_replayable_va_32bit = false;
+   info->has_replayable_va_32bit = radv_ps5_window_replayable();
    info->has_vm_always_valid = true;
    /* buffer_from_ptr gives the application's host memory GPU access, which the
     * GPU reaches at the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */

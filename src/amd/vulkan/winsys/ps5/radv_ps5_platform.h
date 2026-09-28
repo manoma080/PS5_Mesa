@@ -43,14 +43,20 @@ struct radv_ps5_memory {
    uint64_t bytes;
    /* The direct-memory allocation behind it; -1 on the host. */
    int64_t physical;
-   /* The device-memory region granules the mapping took, if any. */
+   /* The device-memory region granules the mapping took, if any, or the
+    * window's replay range's (window_replay). */
    uint32_t granule;
    uint32_t granules;
+   bool window_replay;
 };
 
 /* Initialises AGC once per process. It has to run from the title's own
  * executable, which the driver archive is linked into. */
 bool radv_ps5_platform_init(void);
+
+/* Whether a replayable window buffer can be placed at its captured address
+ * again, whatever else the process mapped since (radv_ps5_memory_alloc_replayable). */
+bool radv_ps5_window_replayable(void);
 
 /* Whether submitted words run on a GPU. The host model completes a submission
  * without running it. */
