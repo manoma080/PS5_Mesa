@@ -11,6 +11,7 @@
 #ifndef RADV_SHADER_OBJECT_H
 #define RADV_SHADER_OBJECT_H
 
+#include "radv_gs_compute.h"
 #include "radv_shader.h"
 
 struct radv_shader_object {
@@ -44,6 +45,21 @@ struct radv_shader_object {
    } gs;
 
    uint32_t dynamic_offset_count;
+
+   /* Geometry shaders run as compute (radv_gs_compute.h) where the GPU has no
+    * legacy GS. A vertex object that may feed a geometry shader keeps its
+    * vertex pass, compiled at the draw for the vertex input, and the mask of
+    * the outputs it stores; a geometry object whose shader NGG cannot run
+    * here (transform feedback) keeps its passes and its rasterization copy,
+    * which a draw binds as the vertex stage. */
+   struct {
+      struct radv_gs_compute_deferred_vs *vs;
+      uint64_t vs_outputs;
+      struct radv_gs_compute_pipeline *gs;
+      struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
+      struct radv_shader *rast;
+      struct radv_shader_binary *rast_binary;
+   } gs_compute;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(radv_shader_object, base, VkShaderEXT, VK_OBJECT_TYPE_SHADER_EXT);

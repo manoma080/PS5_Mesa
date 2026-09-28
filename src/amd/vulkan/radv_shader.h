@@ -293,6 +293,10 @@ struct radv_shader_stage {
 
    nir_shader *nir;
    nir_shader *gs_copy_shader;
+
+   /* A vertex stage that is poly's rasterization copy of a geometry shader run
+    * as compute, compiled on its own (a geometry shader object's). */
+   bool gs_compute_rast;
    nir_shader *internal_nir; /* meta shaders */
 
    struct radv_shader_info info;

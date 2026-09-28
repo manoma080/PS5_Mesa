@@ -19,6 +19,7 @@
 #include "radv_device.h"
 #include "radv_image_view.h"
 #include "radv_physical_device.h"
+#include "radv_gs_compute.h"
 #include "radv_pipeline_graphics.h"
 #include "radv_video.h"
 
@@ -364,6 +365,10 @@ struct radv_cmd_state {
    /* Whether the draw is a geometry shader's rasterization copy (its compute
     * passes counted for the queries). */
    bool gs_compute_rasterizing;
+   /* The geometry-shader-as-compute set the bound shader objects make
+    * (radv_gs_compute_objects): the geometry object's passes, the vertex
+    * object's vertex pass. */
+   struct radv_gs_compute_pipeline gs_compute_objects;
 
    VkShaderStageFlags active_stages;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
