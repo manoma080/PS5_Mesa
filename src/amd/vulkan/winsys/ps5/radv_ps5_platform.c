@@ -586,6 +586,16 @@ radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
    return result == 0;
 }
 
+bool
+radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
+{
+   /* A title's anonymous memory takes GPU access this way, and a shader then
+    * writes it through the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */
+   return sceKernelMprotect(address, bytes,
+                            PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE | PS5_KERNEL_PROT_GPU_READ |
+                               PS5_KERNEL_PROT_GPU_WRITE) == 0;
+}
+
 void
 radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
 {
@@ -726,6 +736,15 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
       return false;
    }
    *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
+   return true;
+}
+
+bool
+radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
+{
+   /* The model runs no GPU work: the memory stays the application's. */
+   (void)address;
+   (void)bytes;
    return true;
 }
 
