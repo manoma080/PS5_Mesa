@@ -345,6 +345,9 @@ endif
 if _vulkan_drivers.contains('amd') and get_option('radv-winsys') == 'ps5' and host_machine.system() != 'linux'
   system_has_kms_drm = false
 endif
+# Its one display is VideoOut (src/vulkan/wsi/wsi_common_videoout.c), in the
+# host model's builds too, rather than a DRM connector.
+with_wsi_videoout = _vulkan_drivers.contains('amd') and get_option('radv-winsys') == 'ps5'
 
 # This has to be below the freedreno_kmds check since that can change system_has_kms_drm
 with_gallium_kmsro = with_gallium_drm or (system_has_kms_drm and with_gallium_zink)

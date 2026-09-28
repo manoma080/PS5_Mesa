@@ -49,6 +49,7 @@ enum wsi_image_type {
    WSI_IMAGE_TYPE_DRM,
    WSI_IMAGE_TYPE_DXGI,
    WSI_IMAGE_TYPE_METAL,
+   WSI_IMAGE_TYPE_VIDEOOUT,
 };
 
 struct wsi_base_image_params {
@@ -598,6 +599,20 @@ wsi_common_get_time_domain(VkSwapchainKHR _swapchain,
              ? VK_TIME_DOMAIN_DEVICE_KHR
              : swapchain->present_timing.time_domain;
 }
+
+#ifdef MESA_WSI_VIDEOOUT
+/* The PlayStation 5's display (wsi_common_videoout.c): images in its
+ * framebuffers, laid out as it scans out. */
+struct wsi_videoout_image_params {
+   struct wsi_base_image_params base;
+};
+
+VkResult
+wsi_videoout_configure_image(const struct wsi_swapchain *chain,
+                             const VkSwapchainCreateInfoKHR *pCreateInfo,
+                             const struct wsi_videoout_image_params *params,
+                             struct wsi_image_info *info);
+#endif
 
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 struct wsi_metal_image_params {
