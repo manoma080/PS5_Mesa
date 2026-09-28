@@ -80,8 +80,11 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
    return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
 }
 
-/* Mesh shaders without task shaders, which run on the compute queue: an
- * experiment on the PS5 (RADV_PS5_MESH), which has no compute queue yet. */
+/* Mesh shaders without task shaders, which RADV runs on an asynchronous
+ * compute queue the PS5 does not offer (taskShader is a feature of its own).
+ * Without per-primitive parameters a workgroup's primitives go out in parts,
+ * the first publishing what the others export (ac_nir_lower_ngg_mesh).
+ */
 static bool
 radv_mesh_enabled(const struct radv_physical_device *pdev)
 {
@@ -91,8 +94,7 @@ radv_mesh_enabled(const struct radv_physical_device *pdev)
       return true;
    if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
       return false;
-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 &&
-          debug_get_bool_option("RADV_PS5_MESH", false);
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3;
 }
 
 bool
