@@ -1428,6 +1428,51 @@ radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void)
    return b.shader;
 }
 
+/* radv_meta_mesh_draw_records: a mesh shader draw's record (radv_mesh_draw_record)
+ * from each VkDrawMeshTasksIndirectCommandEXT.
+ */
+nir_shader *
+radv_meta_nir_build_mesh_draw_records_cs(void)
+{
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_mesh_draw_records_cs");
+   b.shader->info.workgroup_size[0] = 64;
+
+   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
+
+   nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
+   nir_def *records_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 8, .range = 8);
+   nir_def *count_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
+   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
+   nir_def *max_count = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
+   nir_def *parts = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
+
+   /* Only the draws the count buffer has. */
+   nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
+   nir_def *count = nir_umin(&b, nir_build_load_global(&b, 1, 32, count_addr, .align_mul = 4), max_count);
+   nir_pop_if(&b, NULL);
+   count = nir_if_phi(&b, count, max_count);
+
+   nir_push_if(&b, nir_ult(&b, global_id, count));
+   {
+      nir_def *cmd_addr = nir_iadd(&b, indirect_addr, nir_imul(&b, nir_u2u64(&b, global_id), nir_u2u64(&b, stride)));
+      nir_def *grid = nir_build_load_global(&b, 3, 32, cmd_addr, .align_mul = 4);
+
+      /* A vertex launches a workgroup, or each of its parts. */
+      nir_def *vertices = nir_imul(&b, nir_imul(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1)),
+                                   nir_imul(&b, nir_channel(&b, grid, 2), parts));
+      nir_def *zero = nir_imm_int(&b, 0);
+
+      nir_def *record_addr = nir_iadd(&b, records_addr, nir_u2u64(&b, nir_imul_imm(&b, global_id, 32)));
+      nir_build_store_global(&b, nir_vec4(&b, vertices, nir_imm_int(&b, 1), zero, zero), record_addr,
+                             .align_mul = 16);
+      nir_build_store_global(&b, nir_pad_vector_imm_int(&b, grid, 0, 4), nir_iadd_imm(&b, record_addr, 16),
+                             .align_mul = 16);
+   }
+   nir_pop_if(&b, NULL);
+
+   return b.shader;
+}
+
 nir_shader *
 radv_meta_nir_build_copy_memory_indirect_cs(void)
 {

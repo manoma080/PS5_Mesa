@@ -270,6 +270,9 @@ struct radv_shader_info {
        * primitives in, each on vertices of its own (ac_nir_lower_ngg_options
        * ms_prim_parts); 0 with them. */
       uint8_t prim_parts;
+      /* The workgroup count comes from the draw's record in memory
+       * (radv_mesh_draw_record), not user SGPRs. */
+      bool draw_records;
    } ms;
 
    struct radv_streamout_info so;

@@ -524,3 +524,39 @@ radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struc
    progress |= nir_shader_intrinsics_pass(shader, lower_abi_instr, nir_metadata_control_flow, &state);
    return progress;
 }
+
+static bool
+lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
+{
+   const lower_abi_state *s = state;
+
+   if (intrin->intrinsic != nir_intrinsic_load_num_workgroups)
+      return false;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_def *records = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ms_draw_records),
+                                             nir_imm_int(b, s->address32_hi));
+   nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, nir_load_draw_id(b), sizeof(struct radv_mesh_draw_record)),
+                                  offsetof(struct radv_mesh_draw_record, grid));
+   nir_def_replace(&intrin->def, ac_nir_load_smem(b, 3, records, offset, 4, ACCESS_CAN_SPECULATE));
+   return true;
+}
+
+/* A mesh shader's workgroup count from its draw's record
+ * (radv_mesh_draw_record), before the draw ID is lowered to its argument.
+ */
+bool
+radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage, uint32_t address32_hi)
+{
+   if (shader->info.stage != MESA_SHADER_MESH || !stage->info.ms.draw_records)
+      return false;
+
+   lower_abi_state state = {
+      .info = &stage->info,
+      .args = &stage->args,
+      .address32_hi = address32_hi,
+   };
+
+   return nir_shader_intrinsics_pass(shader, lower_mesh_draw_record, nir_metadata_control_flow, &state);
+}

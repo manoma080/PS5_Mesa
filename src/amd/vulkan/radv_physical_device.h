@@ -241,6 +241,17 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
           radv_sparse_enabled(pdev);
 }
 
+/* Without DISPATCH_MESH_INDIRECT_MULTI, mesh shaders without task shaders
+ * launch through ordinary draws, direct or indirect: each draw's workgroup
+ * count lives in a record in memory that the mesh shader reads by draw ID
+ * (radv_mesh_draw_record), which a compute pass writes from the application's
+ * indirect commands. */
+static inline bool
+radv_mesh_draw_records_enabled(const struct radv_physical_device *pdev)
+{
+   return pdev->info.gfx_level == GFX10_3 && !pdev->info.has_dispatch_mesh_indirect;
+}
+
 static inline bool
 radv_has_shader_buffer_float_minmax(const struct radv_physical_device *pdev, unsigned bitsize)
 {

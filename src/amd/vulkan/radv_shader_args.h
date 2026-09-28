@@ -39,6 +39,7 @@ enum radv_ud_index {
    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
    AC_UD_VS_PROLOG_INPUTS,
    AC_UD_VS_GS_COMPUTE_DRAW, /* radv_gs_compute.h: the rasterization VS's draw block */
+   AC_UD_VS_MS_DRAW_RECORDS, /* radv_mesh_draw_record: a mesh shader's */
    AC_UD_VS_MAX_UD,
    AC_UD_PS_STATE,
    AC_UD_PS_MAX_UD,
@@ -81,6 +82,9 @@ struct radv_shader_args {
 
    /* radv_gs_compute.h: the per-draw block of a geometry shader run as compute. */
    struct ac_arg gs_compute_draw;
+
+   /* A mesh shader's draw records (radv_mesh_draw_record). */
+   struct ac_arg ms_draw_records;
 
    struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
 

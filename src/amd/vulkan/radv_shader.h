@@ -276,6 +276,20 @@ struct radv_shader_layout {
    const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping;
 };
 
+/* A mesh shader draw's record when there is no DISPATCH_MESH_INDIRECT_MULTI
+ * (radv_mesh_draw_records_enabled): the ordinary draw launching the draw's
+ * workgroups (a vertex each, a part each with radv_shader_info.ms.prim_parts),
+ * then the workgroup count the shader reads by draw ID.
+ */
+struct radv_mesh_draw_record {
+   uint32_t vertex_count;
+   uint32_t instance_count;
+   uint32_t first_vertex;
+   uint32_t first_instance;
+   uint32_t grid[3];
+   uint32_t pad;
+};
+
 struct radv_shader_stage {
    mesa_shader_stage stage;
    mesa_shader_stage next_stage;
@@ -571,7 +585,8 @@ struct radv_compiler_info {
       uint32_t no_implicit_varying_subgroup_size : 1;
       uint32_t force_nan_preserve_min_max : 1;
       uint32_t nir_debug_info : 1;
-      uint32_t padding : 27;
+      uint32_t mesh_draw_records : 1;
+      uint32_t padding : 26;
 
       int32_t force_aniso;
 

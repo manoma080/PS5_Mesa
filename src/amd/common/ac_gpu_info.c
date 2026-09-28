@@ -1068,6 +1068,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
    info->has_legacy_gs = info->gfx_level < GFX11;
    info->has_gpu_written_ibs = true;
+   info->has_dispatch_mesh_indirect = info->gfx_level >= GFX10_3;
    info->has_perf_counters = true;
    info->has_ps_strict_vertex_order = info->gfx_level >= GFX10_3;
    info->has_vrs = info->gfx_level >= GFX10_3;
@@ -2076,6 +2077,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
    fprintf(f, "    has_legacy_gs = %i\n", info->has_legacy_gs);
    fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
+   fprintf(f, "    has_dispatch_mesh_indirect = %i\n", info->has_dispatch_mesh_indirect);
    fprintf(f, "    has_perf_counters = %i\n", info->has_perf_counters);
    fprintf(f, "    has_ps_strict_vertex_order = %i\n", info->has_ps_strict_vertex_order);
    fprintf(f, "    has_vrs = %i\n", info->has_vrs);

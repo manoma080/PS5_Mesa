@@ -1124,9 +1124,17 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
    info->uses_invocation_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INVOCATION_ID);
    info->uses_prim_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
 
-   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11. */
+   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11, where
+    * DISPATCH_MESH_INDIRECT_MULTI writes it, but for draw records.
+    */
    info->cs.uses_grid_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS) ||
-                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11);
+                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11 &&
+                              !compiler_info->key.mesh_draw_records);
+   if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records && info->cs.uses_grid_size) {
+      /* A draw's record is found by its draw ID. */
+      info->ms.draw_records = true;
+      info->vs.needs_draw_id = true;
+   }
    info->cs.uses_local_invocation_idx = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_LOCAL_INVOCATION_INDEX) |
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SUBGROUP_ID) |
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS) |

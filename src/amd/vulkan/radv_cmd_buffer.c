@@ -11587,6 +11587,31 @@ radv_emit_userdata_mesh(struct radv_cmd_buffer *cmd_buffer, const uint32_t x, co
    const bool uses_drawid = state->uses_drawid;
    const bool uses_grid_size = mesh_shader->info.cs.uses_grid_size;
 
+   if (mesh_shader->info.ms.draw_records) {
+      const struct radv_mesh_draw_record record = {.grid = {x, y, z}};
+      uint32_t offset;
+
+      if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(record), &record, &offset)) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return;
+      }
+      radv_emit_userdata_address(radv_cmd_buffer_device(cmd_buffer), cs, mesh_shader, AC_UD_VS_MS_DRAW_RECORDS,
+                                 radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset);
+   }
+
+   if (radv_mesh_draw_records_enabled(radv_device_physical(radv_cmd_buffer_device(cmd_buffer)))) {
+      /* The first vertex, then the draw ID. */
+      radeon_begin(cs);
+      radeon_set_sh_reg_seq(state->vtx_base_sgpr, state->vtx_emit_num);
+      radeon_emit(0);
+      if (uses_drawid) {
+         radeon_emit(0);
+         state->last_drawid = 0;
+      }
+      radeon_end();
+      return;
+   }
+
    if (!uses_drawid && !uses_grid_size)
       return;
 
@@ -11880,6 +11905,32 @@ radv_emit_indirect_buffer(struct radv_cmd_stream *cs, uint64_t va, bool is_compu
    radeon_emit(va);
    radeon_emit(va >> 32);
    radeon_end();
+}
+
+/* Without DISPATCH_MESH_INDIRECT_MULTI: ordinary indirect draws of the
+ * records radv_meta_mesh_draw_records wrote.
+ */
+static void
+radv_emit_mesh_draw_records_packets(const struct radv_physical_device *pdev, struct radv_cmd_buffer *cmd_buffer,
+                                    const struct radv_draw_info *info, uint64_t records_va)
+{
+   struct radv_cmd_state *state = &cmd_buffer->state;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   radv_emit_indirect_buffer(cs, records_va, false);
+   radv_emit_userdata_address(radv_cmd_buffer_device(cmd_buffer), cs, state->shaders[MESA_SHADER_MESH],
+                              AC_UD_VS_MS_DRAW_RECORDS, records_va);
+
+   if (!state->render.view_mask) {
+      radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
+                                        sizeof(struct radv_mesh_draw_record), true);
+   } else {
+      u_foreach_bit (i, state->render.view_mask) {
+         radv_emit_view_index(pdev, &cmd_buffer->state, cs, i);
+         radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
+                                           sizeof(struct radv_mesh_draw_record), true);
+      }
+   }
 }
 
 ALWAYS_INLINE static void
@@ -15246,6 +15297,28 @@ radv_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDraw
    radv_after_draw(cmd_buffer);
 }
 
+/* The records of an indirect mesh shader draw without task shader when there
+ * is no DISPATCH_MESH_INDIRECT_MULTI (radv_mesh_draw_records_enabled), 0
+ * otherwise or on failure.
+ */
+static uint64_t
+radv_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
+
+   if (!radv_mesh_draw_records_enabled(pdev) || !info->count)
+      return 0;
+
+   if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS)
+      radv_bind_graphics_shaders(cmd_buffer);
+
+   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
+   assert(mesh_shader && !cmd_buffer->state.shaders[MESA_SHADER_TASK]);
+
+   return radv_meta_mesh_draw_records(cmd_buffer, info->indirect_va, info->stride, info->count_va, info->count,
+                                      MAX2(mesh_shader->info.ms.prim_parts, 1));
+}
+
 VKAPI_ATTR void VKAPI_CALL
 radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z)
 {
@@ -15313,11 +15386,17 @@ radv_CmdDrawMeshTasksIndirect2EXT(VkCommandBuffer commandBuffer, const VkDrawInd
    info.indexed = false;
    info.instance_count = 0;
 
+   const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
+   if (radv_mesh_draw_records_enabled(pdev) && !records_va)
+      return;
+
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->drawCount, false))
       return;
 
    if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
       radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info, 0);
+   } else if (records_va) {
+      radv_emit_mesh_draw_records_packets(pdev, cmd_buffer, &info, records_va);
    } else {
       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
    }
@@ -15368,6 +15447,10 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
    info.indexed = false;
    info.instance_count = 0;
 
+   const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
+   if (radv_mesh_draw_records_enabled(pdev) && !records_va)
+      return;
+
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->maxDrawCount, false))
       return;
 
@@ -15389,6 +15472,8 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
 
       radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info,
                                                workaround_cond_va);
+   } else if (records_va) {
+      radv_emit_mesh_draw_records_packets(pdev, cmd_buffer, &info, records_va);
    } else {
       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
    }
