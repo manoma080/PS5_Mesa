@@ -220,6 +220,7 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(GetImageSubresourceLayout);
    if (!wsi->sw)
       WSI_GET_CB(GetMemoryFdKHR);
+   WSI_GET_CB(GetMemoryHostPointerPropertiesEXT);
    WSI_GET_CB(GetPhysicalDeviceCalibrateableTimeDomainsKHR);
    WSI_GET_CB(GetPhysicalDeviceProperties);
    WSI_GET_CB(GetPhysicalDeviceFormatProperties);
@@ -423,6 +424,10 @@ get_blit_type(const struct wsi_device *wsi,
       return wsi_dxgi_image_needs_blit(wsi, dxgi_params, device);
    }
 #endif
+#ifdef MESA_WSI_VIDEOOUT
+   case WSI_IMAGE_TYPE_VIDEOOUT:
+      return WSI_SWAPCHAIN_NO_BLIT;
+#endif
 #if defined(VK_USE_PLATFORM_METAL_EXT)
    case WSI_IMAGE_TYPE_METAL: {
       /* Due to mismatches between WSI and Metal, we require rendering into an
@@ -470,6 +475,13 @@ configure_image(const struct wsi_swapchain *chain,
       const struct wsi_dxgi_image_params *dxgi_params =
          container_of(params, const struct wsi_dxgi_image_params, base);
       return wsi_dxgi_configure_image(chain, pCreateInfo, dxgi_params, info);
+   }
+#endif
+#ifdef MESA_WSI_VIDEOOUT
+   case WSI_IMAGE_TYPE_VIDEOOUT: {
+      const struct wsi_videoout_image_params *videoout_params =
+         container_of(params, const struct wsi_videoout_image_params, base);
+      return wsi_videoout_configure_image(chain, pCreateInfo, videoout_params, info);
    }
 #endif
 #if defined(VK_USE_PLATFORM_METAL_EXT)

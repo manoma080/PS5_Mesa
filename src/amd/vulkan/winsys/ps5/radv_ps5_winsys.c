@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "addrlib/inc/addrtypes.h"
 #include "addrlib/src/amdgpu_asic_addr.h"
 #include "tools/radv_debug.h"
 #include "util/os_time.h"
@@ -324,6 +325,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
     * the command buffers device-generated commands write cannot run. */
    info->has_gpu_written_ibs = false;
+   /* VideoOut scans out 64 KiB R_X tiles (tiling 0) with no pipe or bank
+    * swizzle: ps5vk renders its framebuffers in that mode, and the demo
+    * renderer's CPU-written tiles showed (PS5_Vulkan src/demo_renderer.cpp,
+    * ps5platform/videoout.h). */
+   info->has_fixed_display_swizzle = true;
+   info->display_swizzle_mode = ADDR_SW_64KB_R_X;
    /* No exported function holds the GPU at a stable power state
     * (radv_ps5_ctx_set_pstate refuses every state but none), so the profiling
     * lock VK_KHR_performance_query takes always failed

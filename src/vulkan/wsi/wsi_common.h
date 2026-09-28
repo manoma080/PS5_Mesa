@@ -233,6 +233,7 @@ struct wsi_device {
    WSI_CB(GetImageMemoryRequirements);
    WSI_CB(GetImageSubresourceLayout);
    WSI_CB(GetMemoryFdKHR);
+   WSI_CB(GetMemoryHostPointerPropertiesEXT);
    WSI_CB(GetPhysicalDeviceCalibrateableTimeDomainsKHR);
    WSI_CB(GetPhysicalDeviceProperties);
    WSI_CB(GetPhysicalDeviceFormatProperties);

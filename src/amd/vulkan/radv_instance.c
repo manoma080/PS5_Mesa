@@ -241,9 +241,11 @@ static const struct vk_instance_extension_table radv_instance_extensions_support
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    .KHR_display = true,
    .KHR_get_display_properties2 = true,
+#ifndef MESA_WSI_VIDEOOUT
    .EXT_direct_mode_display = true,
    .EXT_display_surface_counter = true,
    .EXT_acquire_drm_display = true,
+#endif
 #endif
 #ifndef VK_USE_PLATFORM_WIN32_KHR
    .EXT_headless_surface = true,

@@ -880,7 +880,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8 && pdev->info.has_gpu_written_ibs,
       .EXT_device_memory_report = true,
       .EXT_discard_rectangles = true,
-#ifdef VK_USE_PLATFORM_DISPLAY_KHR
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR) && !defined(MESA_WSI_VIDEOOUT)
       .EXT_display_control = true,
 #endif
       .EXT_dynamic_rendering_unused_attachments = true,
