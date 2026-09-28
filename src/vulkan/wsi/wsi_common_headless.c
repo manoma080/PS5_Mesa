@@ -489,12 +489,19 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    struct wsi_base_image_params *image_params = NULL;
    struct wsi_cpu_image_params cpu_params;
+#ifdef HAVE_LIBDRM
    struct wsi_drm_image_params drm_params;
+#endif
+   /* Without libdrm there are no DRM images: a hardware driver's images are
+    * blitted to a host buffer, as a software one's are presented. */
+#ifdef HAVE_LIBDRM
    if (wsi_device->sw) {
+#endif
       cpu_params = (struct wsi_cpu_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_CPU,
       };
       image_params = &cpu_params.base;
+#ifdef HAVE_LIBDRM
    } else {
       drm_params = (struct wsi_drm_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_DRM,
@@ -505,6 +512,7 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       };
       image_params = &drm_params.base;
    }
+#endif
 
    result = wsi_swapchain_init(wsi_device, &chain->base, device,
                                pCreateInfo, image_params, pAllocator);
