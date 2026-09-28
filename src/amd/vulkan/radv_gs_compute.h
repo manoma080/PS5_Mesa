@@ -174,12 +174,19 @@ radv_gs_compute_input_prim(unsigned di_pt)
 static inline unsigned
 radv_gs_compute_rast_topology(enum mesa_prim mode)
 {
+   /* poly draws the geometry shader's strips, or the lists it matched them
+    * to (optimize_static_topology). */
    switch (mode) {
    case MESA_PRIM_POINTS:
       return V_008958_DI_PT_POINTLIST;
+   case MESA_PRIM_LINES:
+      return V_008958_DI_PT_LINELIST;
    case MESA_PRIM_LINE_STRIP:
       return V_008958_DI_PT_LINESTRIP;
+   case MESA_PRIM_TRIANGLES:
+      return V_008958_DI_PT_TRILIST;
    default:
+      assert(mode == MESA_PRIM_TRIANGLE_STRIP);
       return V_008958_DI_PT_TRISTRIP;
    }
 }
