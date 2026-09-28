@@ -196,6 +196,15 @@ uint64_t radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage
 nir_shader *radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key,
                                      struct radv_gs_compute_nir *out);
 
+/* A tessellation control or evaluation shader's pass, for shaders compiled
+ * apart (shader objects): the NIR lowered, and the part of the tessellation
+ * state that stage fixes (the control shader's output patch and outputs; the
+ * evaluation shader's domain, spacing, winding, point mode and outputs). */
+void radv_gs_compute_lower_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key,
+                               struct radv_gs_compute_tess_info *tess);
+void radv_gs_compute_lower_tes(nir_shader *tes, const struct radv_shader_stage_key *key,
+                               struct radv_gs_compute_tess_info *tess);
+
 /* Replaces the system values a geometry shader run as compute reads (poly's,
  * the draw's) with loads from the draw block; the stage's arguments must be
  * declared. */

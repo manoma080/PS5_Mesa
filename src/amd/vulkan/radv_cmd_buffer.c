@@ -6670,9 +6670,17 @@ radv_gs_compute_objects(struct radv_cmd_buffer *cmd_buffer)
    struct radv_cmd_state *state = &cmd_buffer->state;
    const struct radv_shader_object *gs = state->shader_objs[MESA_SHADER_GEOMETRY];
    const struct radv_shader_object *vs = state->shader_objs[MESA_SHADER_VERTEX];
+   const struct radv_shader_object *tcs = state->shader_objs[MESA_SHADER_TESS_CTRL];
+   const struct radv_shader_object *tes = state->shader_objs[MESA_SHADER_TESS_EVAL];
+   const bool tess = tcs || tes;
 
-   if (!gs || !gs->gs_compute.gs || !vs || !vs->gs_compute.vs || state->shader_objs[MESA_SHADER_TESS_CTRL] ||
-       state->shader_objs[MESA_SHADER_TESS_EVAL])
+   if (!gs || !gs->gs_compute.gs || !vs || !vs->gs_compute.vs)
+      return NULL;
+   if (tess && (!tcs || !tes || !tcs->gs_compute.tess_pass || !tes->gs_compute.tess_pass))
+      return NULL;
+   /* As radv_gs_compute_wanted decides for pipelines. */
+   if (!gs->gs_compute.gs->info.xfb && !(tess && gs->gs_compute.amplifies) &&
+       !debug_get_bool_option("RADV_PS5_GS_COMPUTE", false))
       return NULL;
 
    struct radv_gs_compute_pipeline *gsc = &state->gs_compute_objects;
@@ -6680,6 +6688,26 @@ radv_gs_compute_objects(struct radv_cmd_buffer *cmd_buffer)
    gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = NULL;
    gsc->deferred_vs = vs->gs_compute.vs;
    gsc->vs_outputs = vs->gs_compute.vs_outputs;
+   memset(&gsc->tess, 0, sizeof(gsc->tess));
+   if (tess) {
+      /* The control shader's patch and outputs, the evaluation shader's domain
+       * and outputs. */
+      const struct radv_gs_compute_tess_info *c = &tcs->gs_compute.tess, *e = &tes->gs_compute.tess;
+      gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_TCS)] = tcs->gs_compute.tess_pass;
+      gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_TES)] = tes->gs_compute.tess_pass;
+      gsc->tess = (struct radv_gs_compute_tess_info){
+         .used = true,
+         .ccw = e->ccw,
+         .points = e->points,
+         .prim = e->prim,
+         .spacing = e->spacing,
+         .output_patch_size = c->output_patch_size,
+         .patch_outputs = c->patch_outputs,
+         .tcs_stride_B = c->tcs_stride_B,
+         .per_vertex_outputs = c->per_vertex_outputs,
+         .tes_outputs = e->tes_outputs,
+      };
+   }
    return gsc;
 }
 
@@ -13697,7 +13725,8 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
 
       /* A geometry shader run as compute has no hardware stage: its
        * rasterization copy is the vertex stage's. */
-      if (gs_compute && s == MESA_SHADER_GEOMETRY) {
+      if (gs_compute && (s == MESA_SHADER_GEOMETRY ||
+                         (gs_compute->tess.used && (s == MESA_SHADER_TESS_CTRL || s == MESA_SHADER_TESS_EVAL)))) {
          radv_bind_shader(cmd_buffer, NULL, s);
          dynamic_offset_count += shader_obj->dynamic_offset_count;
          continue;
@@ -13735,11 +13764,14 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
     * descriptors too. */
    if (gs_compute) {
       const struct radv_shader_object *vs_obj = cmd_buffer->state.shader_objs[MESA_SHADER_VERTEX];
+      const struct radv_shader *vs_code = gs_compute->tess.used ? vs_obj->as_ls.shader : vs_obj->as_es.shader;
       const struct radv_shader *const extra[] = {
          gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)],
          gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)],
          gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)],
-         vs_obj->as_es.shader ? vs_obj->as_es.shader : vs_obj->shader,
+         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_TCS)],
+         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_TES)],
+         vs_code ? vs_code : vs_obj->shader,
       };
       for (unsigned i = 0; i < ARRAY_SIZE(extra); i++) {
          if (!extra[i])

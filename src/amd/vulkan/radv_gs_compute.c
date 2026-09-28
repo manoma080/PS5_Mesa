@@ -230,8 +230,9 @@ lower_io_for_poly(nir_shader *nir, const struct radv_shader_stage_key *key)
 
 /* The tessellation control shader reads the vertex shader's outputs from
  * memory and writes its own there, one workgroup per patch (poly's layout). */
-static void
-split_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key, struct radv_gs_compute_tess_info *tess)
+void
+radv_gs_compute_lower_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key,
+                          struct radv_gs_compute_tess_info *tess)
 {
    lower_io_for_poly(tcs, key);
    tess->output_patch_size = tcs->info.tess.tcs_vertices_out;
@@ -244,8 +245,9 @@ split_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key, struct radv_
 /* The tessellation evaluation shader runs over the tessellator's output as
  * the geometry shader's vertex stage: its domain point, patch and inputs come
  * from memory, and its outputs go there as a vertex shader's do. */
-static void
-split_tes(nir_shader *tes, const struct radv_shader_stage_key *key, struct radv_gs_compute_tess_info *tess)
+void
+radv_gs_compute_lower_tes(nir_shader *tes, const struct radv_shader_stage_key *key,
+                          struct radv_gs_compute_tess_info *tess)
 {
    lower_io_for_poly(tes, key);
    tess->prim = tes->info.tess._primitive_mode;
@@ -274,8 +276,8 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs_stage->nir;
    if (tcs_stage->nir) {
       merge_tess_info(tcs_stage->nir, tes_stage->nir);
-      split_tcs(tcs_stage->nir, &tcs_stage->key, &out->tess);
-      split_tes(tes_stage->nir, &tes_stage->key, &out->tess);
+      radv_gs_compute_lower_tcs(tcs_stage->nir, &tcs_stage->key, &out->tess);
+      radv_gs_compute_lower_tes(tes_stage->nir, &tes_stage->key, &out->tess);
       out->tess.used = true;
       out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_TCS)] = tcs_stage->nir;
       out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_TES)] = tes_stage->nir;
