@@ -14288,6 +14288,48 @@ radv_gs_compute_heap(struct radv_cmd_buffer *cmd_buffer)
    return va;
 }
 
+/* A graphics stage's descriptor sets, heaps, push constants and dynamic
+ * descriptors, for the stage run as a compute dispatch. */
+static void
+radv_emit_graphics_stage_for_compute(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *shader)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+   if (descriptors->need_indirect_descriptors)
+      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
+   const uint32_t dirty = descriptors->dirty;
+   descriptors->dirty = descriptors->valid;
+   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
+   descriptors->dirty = dirty;
+
+   /* Every valid set and heap: the draw's own flush has cleared their dirty
+    * bits for the stages it drew with. */
+   const uint32_t dirty_heaps = descriptors->dirty_heaps;
+   descriptors->dirty_heaps = descriptors->valid_heaps;
+   radv_emit_descriptor_heaps_per_stage(device, cs, shader, descriptors, cmd_buffer->descriptor_heaps);
+   descriptors->dirty_heaps = dirty_heaps;
+
+   const struct radv_push_constant_state *push_constants =
+      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   uint64_t push_constants_va = 0;
+   if (push_constants->size)
+      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
+   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
+
+   if (descriptors->dynamic_offset_count) {
+      uint64_t va = 0;
+      radv_upload_dynamic_descriptors(cmd_buffer, descriptors, &va);
+      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS, va);
+   }
+   if (descriptors->need_dynamic_descriptors_offset_addr) {
+      uint64_t va = 0;
+      radv_upload_dynamic_descriptors_offsets(cmd_buffer, descriptors, &va);
+      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
+   }
+}
+
 /* One compute pass: x by y invocations, or the workgroup counts at
  * indirect_va. */
 static void
@@ -14311,21 +14353,9 @@ radv_gs_compute_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_s
 
    radv_emit_compute_shader(pdev, cs, shader);
 
-   /* The graphics state's descriptor sets and push constants, all of them. */
-   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   if (descriptors->need_indirect_descriptors)
-      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
-   const uint32_t dirty = descriptors->dirty;
-   descriptors->dirty = descriptors->valid;
-   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
-   descriptors->dirty = dirty;
-
-   const struct radv_push_constant_state *push_constants =
-      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   uint64_t push_constants_va = 0;
-   if (push_constants->size)
-      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
-   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
+   /* The graphics state's descriptor sets, heaps, push constants and
+    * dynamic descriptors, all of them. */
+   radv_emit_graphics_stage_for_compute(cmd_buffer, shader);
 
    radv_emit_userdata_address(device, cs, shader, AC_UD_CS_GS_COMPUTE_DRAW, draw_va);
 
@@ -15429,44 +15459,6 @@ radv_task_emu_begin(struct radv_cmd_buffer *cmd_buffer, struct radv_task_emu *em
    return true;
 }
 
-/* A graphics stage's descriptor sets, heaps, push constants and dynamic
- * descriptors, for the stage run as a compute dispatch. */
-static void
-radv_emit_graphics_stage_for_compute(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *shader)
-{
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
-   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
-
-   if (descriptors->need_indirect_descriptors)
-      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
-   const uint32_t dirty = descriptors->dirty;
-   descriptors->dirty = descriptors->valid;
-   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
-   descriptors->dirty = dirty;
-
-   if (shader->info.descriptor_heap)
-      radv_emit_descriptor_heaps_per_stage(device, cs, shader, descriptors, cmd_buffer->descriptor_heaps);
-
-   const struct radv_push_constant_state *push_constants =
-      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   uint64_t push_constants_va = 0;
-   if (push_constants->size)
-      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
-   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
-
-   if (descriptors->dynamic_offset_count) {
-      uint64_t va = 0;
-      radv_upload_dynamic_descriptors(cmd_buffer, descriptors, &va);
-      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS, va);
-   }
-   if (descriptors->need_dynamic_descriptors_offset_addr) {
-      uint64_t va = 0;
-      radv_upload_dynamic_descriptors_offsets(cmd_buffer, descriptors, &va);
-      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
-   }
-}
-
 /* A chunk's task shader dispatch: groups workgroups, or the workgroups at
  * indirect_va. */
 static void
@@ -15514,6 +15506,14 @@ radv_task_emu_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_tas
    radeon_end();
    radv_emit_userdata_address(device, cs, shader, AC_UD_CS_TASK_EMU, block_va);
 
+   /* The application's pipeline statistics count its own work, as around
+    * meta operations (radv_suspend_queries): not these compute invocations. */
+   const bool stats = radv_get_num_pipeline_stat_queries(cmd_buffer) > 0;
+   if (stats) {
+      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_START_PIPELINE_STATS;
+      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_STOP_PIPELINE_STATS;
+   }
+
    radv_emit_cache_flush(cmd_buffer);
 
    const struct radv_dispatch_info info = {
@@ -15524,6 +15524,10 @@ radv_task_emu_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_tas
 
    /* The records prepass reads the draw ring. */
    cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
+   if (stats) {
+      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_STOP_PIPELINE_STATS;
+      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_START_PIPELINE_STATS;
+   }
 }
 
 /* A chunk's mesh workgroups, from its draw ring's count entries or the count
