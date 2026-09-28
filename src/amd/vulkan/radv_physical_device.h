@@ -222,6 +222,15 @@ radv_physical_device_instance(const struct radv_physical_device *pdev)
    return (struct radv_instance *)pdev->vk.instance;
 }
 
+/* A compute and transfer family whose queues run on the graphics ring
+ * (radeon_info.num_compute_queues_on_gfx): RADV_QUEUE_GENERAL queues that
+ * offer no graphics. */
+static inline bool
+radv_compute_on_gfx_queue_enabled(const struct radv_physical_device *pdev)
+{
+   return pdev->info.num_compute_queues_on_gfx > 0 && pdev->info.ip[AMD_IP_COMPUTE].num_queues == 0;
+}
+
 static inline bool
 radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {

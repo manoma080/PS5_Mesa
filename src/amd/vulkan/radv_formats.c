@@ -409,7 +409,7 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
          if (vk_format_has_depth(format) && vk_format_has_stencil(format))
             tiled &= ~VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
 
-         if (radv_compute_queue_enabled(pdev)) {
+         if (radv_compute_queue_enabled(pdev) || radv_compute_on_gfx_queue_enabled(pdev)) {
             tiled |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
                      VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR;
          }
