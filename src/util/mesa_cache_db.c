@@ -421,11 +421,15 @@ mesa_db_fopen(const char *path)
     */
 #if defined(__PROSPERO__)
    /* A PS5 title's files stay open to the console's FTP service, which runs as
-    * another user: 0666, whatever the umask. */
+    * another user: 0666, whatever the umask. A change of mode is a metadata
+    * write, near a millisecond on the console, and the files are opened at
+    * every access, so the mode changes only when it is not already so. */
    int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0666);
    if (fd < 0)
       return NULL;
-   fchmod(fd, 0666);
+   struct stat st;
+   if (fstat(fd, &st) == 0 && (st.st_mode & 0777) != 0666)
+      fchmod(fd, 0666);
 #else
    int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0644);
    if (fd < 0)

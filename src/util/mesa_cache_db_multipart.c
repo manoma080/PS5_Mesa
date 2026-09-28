@@ -50,10 +50,13 @@ mesa_cache_db_multipart_init_part_locked(struct mesa_cache_db_multipart *db,
 #if defined(__PROSPERO__)
    /* A PS5 title's folders stay open to the console's FTP service, which
     * runs as another user: 0777, whatever the umask, parts an earlier build
-    * made included. */
+    * made included. A change of mode is a metadata write, near a millisecond
+    * on the console, so it is made only when needed. */
+   struct stat st;
    if (mkdir(part_path, 0777) == -1 && errno != EEXIST)
       goto free_path;
-   chmod(part_path, 0777);
+   if (stat(part_path, &st) == 0 && (st.st_mode & 0777) != 0777)
+      chmod(part_path, 0777);
 #else
    if (mkdir(part_path, 0755) == -1 && errno != EEXIST)
       goto free_path;
@@ -86,6 +89,29 @@ free_path:
    free(part_path);
 
    return db_opened;
+#endif
+}
+
+/* Parts are made by writes. A lookup that misses would otherwise make every
+ * part, with its folder and files, while an absent part holds nothing. */
+static bool
+mesa_cache_db_multipart_part_exists(struct mesa_cache_db_multipart *db,
+                                    unsigned int part)
+{
+#if DETECT_OS_WINDOWS
+   return false;
+#else
+   char *part_path = NULL;
+   struct stat st;
+   bool exists;
+
+   if (asprintf(&part_path, "%s/part%u", db->cache_path, part) == -1)
+      return true;
+
+   exists = stat(part_path, &st) == 0 && S_ISDIR(st.st_mode);
+   free(part_path);
+
+   return exists;
 #endif
 }
 
@@ -141,6 +167,9 @@ mesa_cache_db_multipart_read_entry(struct mesa_cache_db_multipart *db,
 
    for (unsigned int i = 0; i < db->num_parts; i++) {
       unsigned int part = (last_read_part + i) % db->num_parts;
+
+      if (!db->parts[part] && !mesa_cache_db_multipart_part_exists(db, part))
+         continue;
 
       if (!mesa_cache_db_multipart_init_part(db, part))
          break;
