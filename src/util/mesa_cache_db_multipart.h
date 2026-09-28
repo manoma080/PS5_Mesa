@@ -18,6 +18,9 @@ struct mesa_cache_db_multipart {
    const char *cache_path;
    uint64_t max_cache_size;
    simple_mtx_t lock;
+   /* The parts are this process's alone (MESA_DISK_CACHE_DATABASE_EXCLUSIVE):
+    * opened once and shared by every cache of the process on the same path. */
+   bool exclusive;
 };
 
 bool

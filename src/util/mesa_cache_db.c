@@ -57,6 +57,8 @@ struct mesa_index_db_hash_entry {
    uint64_t last_access_time;
    uint32_t size;
    bool evicted;
+   /* The access time in memory is newer than the index file's (owned). */
+   bool time_dirty;
 };
 
 static inline bool mesa_db_seek_end(FILE *file)
@@ -114,6 +116,10 @@ mesa_db_lock(struct mesa_cache_db *db)
 {
    simple_mtx_lock(&db->flock_mtx);
 
+   /* An owned database's files stay open and locked. */
+   if (db->owned)
+      return true;
+
    if (!mesa_db_reopen_file(&db->index) ||
        !mesa_db_reopen_file(&db->cache))
       goto close_files;
@@ -140,11 +146,13 @@ close_files:
 static void
 mesa_db_unlock(struct mesa_cache_db *db)
 {
-   mesa_db_flock(db->index.file, LOCK_UN);
-   mesa_db_flock(db->cache.file, LOCK_UN);
+   if (!db->owned) {
+      mesa_db_flock(db->index.file, LOCK_UN);
+      mesa_db_flock(db->cache.file, LOCK_UN);
 
-   mesa_db_close_file(&db->index);
-   mesa_db_close_file(&db->cache);
+      mesa_db_close_file(&db->index);
+      mesa_db_close_file(&db->cache);
+   }
 
    simple_mtx_unlock(&db->flock_mtx);
 }
@@ -413,6 +421,62 @@ mesa_db_reload(struct mesa_cache_db *db)
    return mesa_db_load(db, true);
 }
 
+/* Brings memory up to date with the files, which another process may have
+ * changed. An owned database's memory is the database. */
+static bool
+mesa_db_refresh(struct mesa_cache_db *db)
+{
+   if (db->owned)
+      return true;
+
+   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
+      return false;
+
+   return mesa_db_update_index(db);
+}
+
+/* Writes the access times read hits changed in memory to the index file
+ * (owned databases, which do not write one at every hit). */
+static bool
+mesa_db_write_times(struct mesa_cache_db *db)
+{
+   struct mesa_index_db_file_entry index_entry;
+   bool success = true;
+
+   if (!db->dirty_times)
+      return true;
+
+   hash_table_foreach(&db->index_db->table, entry) {
+      struct mesa_index_db_hash_entry *hash_entry = entry->data;
+
+      if (!hash_entry->time_dirty)
+         continue;
+
+      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+          !mesa_db_read(db->index.file, &index_entry) ||
+          index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset) {
+         success = false;
+         break;
+      }
+
+      index_entry.last_access_time = hash_entry->last_access_time;
+
+      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+          !mesa_db_write(db->index.file, &index_entry)) {
+         success = false;
+         break;
+      }
+
+      hash_entry->time_dirty = false;
+   }
+
+   fflush(db->index.file);
+   if (success)
+      db->dirty_times = 0;
+
+   return success;
+}
+
 static FILE *
 mesa_db_fopen(const char *path)
 {
@@ -553,6 +617,8 @@ mesa_db_compact(struct mesa_cache_db *db, int64_t blob_size,
    unsigned int i = 0;
 
    /* reload index to sync the last access times */
+   if (db->owned && !mesa_db_write_times(db))
+      return false;
    if (!remove_entry && !mesa_db_reload(db))
       return false;
 
@@ -689,6 +755,15 @@ cleanup:
       fclose(compacted_cache);
    free(entries);
 
+   /* An owned database's streams outlive the compaction, which wrote the
+    * files through others: reopen them, so no buffer holds what was there. */
+   if (db->owned) {
+      mesa_db_close_file(&db->cache);
+      mesa_db_close_file(&db->index);
+      if (!mesa_db_reopen_file(&db->cache) || !mesa_db_reopen_file(&db->index))
+         success = false;
+   }
+
    /* reload compacted index */
    if (success && !mesa_db_reload(db))
       success = false;
@@ -696,8 +771,8 @@ cleanup:
    return success;
 }
 
-bool
-mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
+static bool
+mesa_cache_db_open_impl(struct mesa_cache_db *db, const char *cache_path, bool own)
 {
    if (!mesa_db_open_file(&db->cache, cache_path, "mesa_cache.db"))
       return false;
@@ -705,9 +780,24 @@ mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
    if (!mesa_db_open_file(&db->index, cache_path, "mesa_cache.idx"))
       goto close_cache;
 
+   /* Owned: locked for this process's whole life, or not at all when another
+    * holds it, since its per-access locks would then wait forever. The locks
+    * are on descriptors of their own: the streams are reopened after a
+    * compaction, which rewrites the files through other streams. */
+   db->lock_fds[0] = db->lock_fds[1] = -1;
+   if (own) {
+      db->lock_fds[0] = open(db->cache.path, O_RDONLY | O_CLOEXEC);
+      db->lock_fds[1] = open(db->index.path, O_RDONLY | O_CLOEXEC);
+      if (db->lock_fds[0] < 0 || db->lock_fds[1] < 0 ||
+          flock(db->lock_fds[0], LOCK_EX | LOCK_NB) < 0 ||
+          flock(db->lock_fds[1], LOCK_EX | LOCK_NB) < 0)
+         goto close_locks;
+      db->owned = true;
+   }
+
    db->mem_ctx = ralloc_context(NULL);
    if (!db->mem_ctx)
-      goto close_index;
+      goto close_locks;
 
    simple_mtx_init(&db->flock_mtx, mtx_plain);
 
@@ -726,12 +816,30 @@ destroy_mtx:
    simple_mtx_destroy(&db->flock_mtx);
 
    ralloc_free(db->mem_ctx);
-close_index:
+close_locks:
+   for (unsigned i = 0; i < 2; i++) {
+      if (db->lock_fds[i] >= 0)
+         close(db->lock_fds[i]);
+      db->lock_fds[i] = -1;
+   }
+   db->owned = false;
    mesa_db_free_file(&db->index);
 close_cache:
    mesa_db_free_file(&db->cache);
 
    return false;
+}
+
+bool
+mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
+{
+   return mesa_cache_db_open_impl(db, cache_path, false);
+}
+
+bool
+mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path)
+{
+   return mesa_cache_db_open_impl(db, cache_path, true);
 }
 
 bool
@@ -753,12 +861,23 @@ mesa_db_wipe_path(const char *cache_path)
 void
 mesa_cache_db_close(struct mesa_cache_db *db)
 {
+   if (db->owned && db->alive) {
+      simple_mtx_lock(&db->flock_mtx);
+      mesa_db_write_times(db);
+      simple_mtx_unlock(&db->flock_mtx);
+   }
+
    _mesa_hash_table_u64_destroy(db->index_db);
    simple_mtx_destroy(&db->flock_mtx);
    ralloc_free(db->mem_ctx);
 
    mesa_db_free_file(&db->index);
    mesa_db_free_file(&db->cache);
+
+   for (unsigned i = 0; i < 2; i++) {
+      if (db->owned && db->lock_fds[i] >= 0)
+         close(db->lock_fds[i]);
+   }
 }
 
 void
@@ -791,10 +910,7 @@ mesa_cache_db_read_entry(struct mesa_cache_db *db,
    if (!db->alive)
       goto fail;
 
-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
-      goto fail_fatal;
-
-   if (!mesa_db_update_index(db))
+   if (!mesa_db_refresh(db))
       goto fail_fatal;
 
    hash_entry = _mesa_hash_table_u64_search(db->index_db, hash);
@@ -817,21 +933,34 @@ mesa_cache_db_read_entry(struct mesa_cache_db *db,
        util_hash_crc32(data, cache_entry.size) != cache_entry.crc)
       goto fail_fatal;
 
-   if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
-       !mesa_db_read(db->index.file, &index_entry) ||
-       !mesa_db_index_entry_valid(&index_entry) ||
-       index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset ||
-       index_entry.size != hash_entry->size)
-      goto fail_fatal;
+   if (db->owned) {
+      /* The index file's copy of the access time is written in batches: a
+       * write at every hit, under the lock, made readers on other threads
+       * wait for it. */
+      hash_entry->last_access_time = os_time_get_nano();
+      if (!hash_entry->time_dirty) {
+         hash_entry->time_dirty = true;
+         db->dirty_times++;
+      }
+      if (db->dirty_times >= 256 && !mesa_db_write_times(db))
+         goto fail_fatal;
+   } else {
+      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+          !mesa_db_read(db->index.file, &index_entry) ||
+          !mesa_db_index_entry_valid(&index_entry) ||
+          index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset ||
+          index_entry.size != hash_entry->size)
+         goto fail_fatal;
 
-   index_entry.last_access_time = os_time_get_nano();
-   hash_entry->last_access_time = index_entry.last_access_time;
+      index_entry.last_access_time = os_time_get_nano();
+      hash_entry->last_access_time = index_entry.last_access_time;
 
-   if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
-       !mesa_db_write(db->index.file, &index_entry))
-      goto fail_fatal;
+      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+          !mesa_db_write(db->index.file, &index_entry))
+         goto fail_fatal;
 
-   fflush(db->index.file);
+      fflush(db->index.file);
+   }
 
    mesa_db_unlock(db);
 
@@ -878,7 +1007,7 @@ mesa_cache_db_entry_write(struct mesa_cache_db *db,
    if (!db->alive)
       goto fail;
 
-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
+   if (!db->owned && mesa_db_uuid_changed(db) && !mesa_db_reload(db))
       goto fail_fatal;
 
    if (!mesa_db_seek_end(db->cache.file))
@@ -888,7 +1017,7 @@ mesa_cache_db_entry_write(struct mesa_cache_db *db,
       if (!mesa_db_compact(db, MAX2(blob_size, mesa_cache_db_eviction_size(db)),
                            NULL))
          goto fail_fatal;
-   } else {
+   } else if (!db->owned) {
       if (!mesa_db_update_index(db))
          goto fail_fatal;
    }
@@ -961,10 +1090,7 @@ mesa_cache_db_entry_remove(struct mesa_cache_db *db,
    if (!db->alive)
       goto fail;
 
-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
-      goto fail_fatal;
-
-   if (!mesa_db_update_index(db))
+   if (!mesa_db_refresh(db))
       goto fail_fatal;
 
    hash_entry = _mesa_hash_table_u64_search(db->index_db, hash);
@@ -1047,7 +1173,7 @@ mesa_cache_db_eviction_score(struct mesa_cache_db *db)
    if (!db->alive)
       goto fail;
 
-   if (!mesa_db_reload(db))
+   if (!db->owned && !mesa_db_reload(db))
       goto fail_fatal;
 
    num_entries = _mesa_hash_table_num_entries(&db->index_db->table);
