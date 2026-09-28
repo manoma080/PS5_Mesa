@@ -266,6 +266,10 @@ struct radv_shader_info {
       bool needs_ms_scratch_ring;
       bool has_task; /* If mesh shader is used together with a task shader. */
       bool has_query;
+      /* Without per-primitive parameters, the parts a workgroup exports its
+       * primitives in, each on vertices of its own (ac_nir_lower_ngg_options
+       * ms_prim_parts); 0 with them. */
+      uint8_t prim_parts;
    } ms;
 
    struct radv_streamout_info so;

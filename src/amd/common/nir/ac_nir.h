@@ -247,6 +247,15 @@ typedef struct {
 
    /* MS */
    bool multiview;
+   /* Without per-primitive parameters (GFX10.1's parameter cache), a mesh
+    * shader gives each primitive vertices of its own, which carry its
+    * per-primitive outputs as per-vertex ones, flat. As one NGG subgroup
+    * exports 256 vertices at most, a workgroup's primitives go out in
+    * ms_prim_parts parts: the API workgroup runs once per part (hardware
+    * workgroup index = API index * parts + part), its side effects in the
+    * first part only. 0 exports per-primitive parameters.
+    */
+   unsigned ms_prim_parts;
 } ac_nir_lower_ngg_options;
 
 bool

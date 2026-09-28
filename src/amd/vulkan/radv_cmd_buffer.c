@@ -3663,9 +3663,15 @@ radv_emit_ps_inputs(struct radv_cmd_buffer *cmd_buffer)
       ps_input_cntl[ps_offset++] = offset_to_ps_input(outinfo->vs_output_param_offset[VARYING_SLOT_PRIMITIVE_ID], t);
    }
 
-   /* Per-primitive PS inputs: the HW needs these to be last. */
-   num_per_primitive_params += util_bitcount(ps->info.ps.input_per_primitive_mask);
-   input_mask_to_ps_inputs(outinfo, ps, ps->info.ps.input_per_primitive_mask, ps_input_cntl, &ps_offset, per_prim);
+   /* Per-primitive PS inputs: the HW needs these to be last. A mesh shader
+    * without per-primitive parameters exports them per vertex, flat on
+    * vertices each primitive has to itself (radv_shader_info.ms.prim_parts). */
+   const bool per_prim_as_vertex =
+      last_vgt_shader->info.stage == MESA_SHADER_MESH && last_vgt_shader->info.ms.prim_parts;
+   if (!per_prim_as_vertex)
+      num_per_primitive_params += util_bitcount(ps->info.ps.input_per_primitive_mask);
+   input_mask_to_ps_inputs(outinfo, ps, ps->info.ps.input_per_primitive_mask, ps_input_cntl, &ps_offset,
+                           per_prim_as_vertex ? radv_ps_in_flat : per_prim);
 
    /* Only GFX10.3+ support per-primitive params */
    assert(pdev->info.gfx_level >= GFX10_3 || num_per_primitive_params == 0);
@@ -11847,7 +11853,10 @@ radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
          }
       }
    } else {
-      const uint32_t count = x * y * z;
+      /* A mesh shader exporting its primitives in parts launches a hardware
+       * workgroup per part (radv_shader_info.ms.prim_parts). */
+      const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
+      const uint32_t count = x * y * z * MAX2(mesh_shader->info.ms.prim_parts, 1);
       if (!view_mask) {
          radv_cs_emit_draw_packet(cmd_buffer, count, 0);
       } else {
