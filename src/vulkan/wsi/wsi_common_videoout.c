@@ -1055,7 +1055,11 @@ videoout_surface_create_swapchain(VkIcdSurfaceBase *icd_surface, VkDevice device
    for (uint32_t i = 0; i < num_images; i++) {
       result = wsi_create_image(&chain->base, &chain->base.image_info, &chain->images[i]);
       if (result != VK_SUCCESS) {
-         videoout_swapchain_destroy(&chain->base, pAllocator);
+         /* wsi_create_image destroyed the one that failed. */
+         for (uint32_t j = 0; j < i; j++)
+            wsi_destroy_image(&chain->base, &chain->images[j]);
+         wsi_swapchain_finish(&chain->base);
+         vk_free(pAllocator, chain);
          return result;
       }
    }
