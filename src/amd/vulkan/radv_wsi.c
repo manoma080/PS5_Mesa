@@ -52,7 +52,10 @@ radv_wsi_get_prime_blit_queue(VkDevice _device)
       return &device->private_sdma_queue->vk;
    }
 
-   if (pdev->info.gfx_level >= GFX9 && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
+   /* Only with an SDMA engine to run it: otherwise the blit goes with the
+    * present, on the presenting queue. */
+   if (pdev->info.gfx_level >= GFX9 && pdev->info.ip[AMD_IP_SDMA].num_queues > 0 &&
+       pdev->info.sdma_ip_version != SDMA_UNKNOWN && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
 
       uint32_t queue_family_index = pdev->num_queues;
       for (uint32_t i = 0; i < pdev->num_queues; i++) {
