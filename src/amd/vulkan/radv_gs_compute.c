@@ -415,6 +415,12 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          return false;
       value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(draw_id), 1);
       break;
+   case nir_intrinsic_load_view_index:
+      /* The rasterization copy has the hardware's; the passes, the draw's. */
+      if (!compute)
+         return false;
+      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(view_index), 1);
+      break;
    default:
       return false;
    }

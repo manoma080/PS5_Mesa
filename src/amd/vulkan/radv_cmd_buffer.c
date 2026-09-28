@@ -14261,6 +14261,7 @@ radv_gs_compute_prepare(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs
       .input_topology = mode,
       .provoking_last = d->vk.rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
       .rasterization_stream = d->vk.rs.rasterization_stream,
+      .view_index = cmd_buffer->state.gs_compute_view,
    };
    return xfb ? offsets : 0;
 }
@@ -14412,6 +14413,7 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
    const uint32_t saved_topology = d->vk.ia.primitive_topology;
    const bool saved_restart = d->vk.ia.primitive_restart_enable;
+   const uint32_t saved_view_mask = state->render.view_mask;
    const uint32_t saved_restart_index = state->primitive_restart_index;
    const struct radv_index_buffer_state saved_index_buffer = state->index_buffer;
    const bool indexed = poly_gs_indexed(gsc->info.shape);
@@ -14436,6 +14438,10 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    state->gs_compute_rasterizing = true;
    state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
 
+   /* The passes ran for one view: its draw alone. */
+   if (saved_view_mask)
+      state->render.view_mask = BITFIELD_BIT(state->gs_compute_view);
+
    const struct radv_draw_info rast = {
       .count = direct ? direct->index_count : 1,
       .instance_count = direct ? direct->instance_count : 0,
@@ -14458,6 +14464,7 @@ radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       radv_after_draw(cmd_buffer);
    }
 
+   state->render.view_mask = saved_view_mask;
    state->streamout.suspended = saved_suspended;
    state->gs_compute_rasterizing = false;
    state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
@@ -14700,6 +14707,7 @@ radv_gs_compute_draw_tess(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       .provoking_last = d->vk.rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
       .rasterization_stream = d->vk.rs.rasterization_stream,
       .draw_id = draw_index,
+      .view_index = state->gs_compute_view,
    };
    const uint64_t block_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
 
@@ -14770,21 +14778,13 @@ radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer)
    return pipeline ? pipeline->base.gs_compute : radv_gs_compute_objects(cmd_buffer);
 }
 
-/* A draw whose counts the CPU knows. Returns false when the bound pipeline
- * has no geometry shader run as compute, for the caller to draw as usual. */
-static bool
-radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t first,
-                     int32_t vertex_offset, uint32_t draw_id)
+/* A draw whose counts the CPU knows, for one view (radv_gs_compute_draw). */
+static void
+radv_gs_compute_draw_view(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
+                          const struct radv_draw_info *info, uint32_t first, int32_t vertex_offset, uint32_t draw_id)
 {
-   const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
-   if (!gsc)
-      return false;
-
    struct radv_cmd_state *state = &cmd_buffer->state;
    const struct radv_dynamic_state *d = &state->dynamic;
-
-   if (!info->count || !info->instance_count)
-      return true;
 
    /* Tessellation's counts are the tessellator's: the GPU sizes the rest. */
    if (gsc->tess.used) {
@@ -14800,7 +14800,7 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
                                    radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL), 0, draw_id, 0, 0,
                                    0);
       }
-      return true;
+      return;
    }
 
    /* Primitive restart needs the index values: the GPU unrolls them. */
@@ -14809,7 +14809,7 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
                                                  info->first_instance};
       radv_gs_compute_draw_gpu(cmd_buffer, gsc, true, radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL),
                                0, draw_id, 0, 0, 0, NULL);
-      return true;
+      return;
    }
 
    const enum mesa_prim mode = radv_gs_compute_input_prim(d->vk.ia.primitive_topology);
@@ -14857,6 +14857,30 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
    radv_gs_compute_run_passes(cmd_buffer, gsc, draw_va, block.geometry_params, info->count, gp.grid[0],
                               info->instance_count, 0, xfb_offsets_va);
    radv_gs_compute_rasterize(cmd_buffer, gsc, draw_va, rast_index_va, rast.index_count, &rast, 0);
+}
+
+/* With multiview, a shader run as compute has no view of its own: each view's
+ * draw runs the passes again with the view in their block, and rasterizes
+ * that view alone. */
+#define radv_gs_compute_foreach_view(state, views)                                                   \
+   for (uint32_t views = (state)->render.view_mask ? (state)->render.view_mask : 1;                   \
+        views && (((state)->gs_compute_view = u_bit_scan(&views)), true);)
+
+/* A draw whose counts the CPU knows. Returns false when the bound pipeline
+ * has no geometry shader run as compute, for the caller to draw as usual. */
+static bool
+radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t first,
+                     int32_t vertex_offset, uint32_t draw_id)
+{
+   const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
+   if (!gsc)
+      return false;
+   if (!info->count || !info->instance_count)
+      return true;
+
+   radv_gs_compute_foreach_view(&cmd_buffer->state, views)
+      radv_gs_compute_draw_view(cmd_buffer, gsc, info, first, vertex_offset, draw_id);
+   cmd_buffer->state.gs_compute_view = 0;
    return true;
 }
 
@@ -14868,13 +14892,16 @@ radv_gs_compute_draw_indirect(struct radv_cmd_buffer *cmd_buffer, const struct r
    if (!gsc)
       return false;
 
-   for (uint32_t i = 0; i < info->count; i++) {
-      const uint64_t draw_va = info->indirect_va + (uint64_t)i * info->stride;
-      if (gsc->tess.used)
-         radv_gs_compute_draw_tess(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0);
-      else
-         radv_gs_compute_draw_gpu(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0, NULL);
+   radv_gs_compute_foreach_view(&cmd_buffer->state, views) {
+      for (uint32_t i = 0; i < info->count; i++) {
+         const uint64_t draw_va = info->indirect_va + (uint64_t)i * info->stride;
+         if (gsc->tess.used)
+            radv_gs_compute_draw_tess(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0);
+         else
+            radv_gs_compute_draw_gpu(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0, NULL);
+      }
    }
+   cmd_buffer->state.gs_compute_view = 0;
    return true;
 }
 
@@ -17649,12 +17676,15 @@ radv_CmdDrawIndirectByteCount2EXT(VkCommandBuffer commandBuffer, uint32_t instan
    if (gsc) {
       const VkDrawIndirectCommand args = {0, instanceCount, 0, firstInstance};
       const uint64_t args_va = radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL);
-      if (gsc->tess.used)
-         radv_gs_compute_draw_tess(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
-                                   counterOffset, vertexStride);
-      else
-         radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
-                                  counterOffset, vertexStride, NULL);
+      radv_gs_compute_foreach_view(&cmd_buffer->state, views) {
+         if (gsc->tess.used)
+            radv_gs_compute_draw_tess(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
+                                      counterOffset, vertexStride);
+         else
+            radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
+                                     counterOffset, vertexStride, NULL);
+      }
+      cmd_buffer->state.gs_compute_view = 0;
       return;
    }
 

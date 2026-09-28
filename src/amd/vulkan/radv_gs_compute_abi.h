@@ -30,8 +30,9 @@ struct radv_gs_compute_draw {
    uint32_t base_instance;
    uint32_t draw_id;
    uint32_t rasterization_stream;
+   uint32_t view_index; /* with multiview, the view this draw's passes run for */
 } PACKED;
-static_assert(sizeof(struct radv_gs_compute_draw) == 16 * 4, "struct radv_gs_compute_draw must be 16 words");
+static_assert(sizeof(struct radv_gs_compute_draw) == 17 * 4, "struct radv_gs_compute_draw must be 17 words");
 
 /* A draw whose counts live in memory (indirect, byte count, or unrolled for
  * primitive restart) is set up by one invocation of radv_gs_compute_setup:
