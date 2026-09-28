@@ -293,6 +293,31 @@ struct radv_mesh_draw_record {
    uint32_t publish_ring; /* the low 32 bits: it is in the 32-bit window */
    uint64_t first_workgroup;
    uint64_t workgroups;
+   /* With emulated task shaders (radv_task_emulated): the first record's task
+    * ring table (radv_task_emu_rings, in the 32-bit window), and each record's
+    * task draw, which the mesh shader reads as its draw ID. The record's index
+    * in its packet is its task workgroup's ring entry. */
+   uint32_t task_rings;
+   uint32_t task_draw_id;
+   uint32_t pad[2];
+};
+
+/* An emulated task draw's chunk (radv_task_emulated), which its task shader
+ * reads: the task workgroup grid, the draw's index, and the first of the
+ * draw's task workgroups in this chunk, in x, then y, then z order. The chunk
+ * dispatches its workgroups in one dimension. */
+struct radv_task_emu_block {
+   uint32_t grid[3];
+   uint32_t draw_id;
+   uint32_t first_workgroup;
+   uint32_t pad[3];
+};
+
+/* The task rings of an emulated task draw (radv_task_emulated): the ring
+ * table the shaders read RING_TS_DRAW and RING_TS_PAYLOAD from, entries sized
+ * to the pipeline's payload. */
+struct radv_task_emu_rings {
+   uint32_t descriptors[RING_TS_PAYLOAD + 1][4];
 };
 
 struct radv_shader_stage {
@@ -591,7 +616,8 @@ struct radv_compiler_info {
       uint32_t force_nan_preserve_min_max : 1;
       uint32_t nir_debug_info : 1;
       uint32_t mesh_draw_records : 1;
-      uint32_t padding : 26;
+      uint32_t task_emulation : 1;
+      uint32_t padding : 25;
 
       int32_t force_aniso;
 

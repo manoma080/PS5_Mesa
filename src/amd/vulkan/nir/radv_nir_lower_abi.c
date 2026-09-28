@@ -530,11 +530,31 @@ lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 {
    const lower_abi_state *s = state;
    const unsigned record_bytes = sizeof(struct radv_mesh_draw_record);
+   const bool has_task = s->info->ms.has_task;
+
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_num_workgroups:
+   case nir_intrinsic_load_ms_publish_ring_amd:
+   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
+   case nir_intrinsic_load_ms_publish_workgroups_amd:
+      break;
+   case nir_intrinsic_load_draw_id:
+   case nir_intrinsic_load_task_ring_entry_amd:
+   case nir_intrinsic_load_ring_task_draw_amd:
+   case nir_intrinsic_load_ring_task_payload_amd:
+      if (!has_task)
+         return false;
+      break;
+   default:
+      return false;
+   }
 
    b->cursor = nir_before_instr(&intrin->instr);
 
    nir_def *records = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ms_draw_records),
                                              nir_imm_int(b, s->address32_hi));
+   /* The draw's index in its packet, which the load below is not replaced
+    * again for: it is the record's. */
    nir_def *draw = nir_imul_imm(b, nir_load_draw_id(b), record_bytes);
    nir_def *first_record = nir_imm_int(b, 0);
    nir_def *value;
@@ -562,8 +582,72 @@ lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
                                ACCESS_CAN_SPECULATE);
       value = nir_pack_64_2x32(b, value);
       break;
-   default:
+   case nir_intrinsic_load_draw_id:
+      /* Fed by an emulated task shader: the task draw's index. */
+      value = ac_nir_load_smem(b, 1, records,
+                               nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, task_draw_id)), 4,
+                               ACCESS_CAN_SPECULATE);
+      break;
+   case nir_intrinsic_load_task_ring_entry_amd:
+      /* The record's index is its task workgroup's ring entry. */
+      value = nir_load_draw_id(b);
+      break;
+   default: {
+      /* The task rings, from the table the first record names. */
+      const unsigned ring = intrin->intrinsic == nir_intrinsic_load_ring_task_draw_amd ? RING_TS_DRAW : RING_TS_PAYLOAD;
+      nir_def *table = ac_nir_load_smem(
+         b, 1, records, nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, task_rings)), 4,
+         ACCESS_CAN_SPECULATE);
+      table = nir_pack_64_2x32_split(b, table, nir_imm_int(b, s->address32_hi));
+      value = ac_nir_load_smem(b, 4, table, nir_imm_int(b, ring * 16u), 4, ACCESS_CAN_SPECULATE);
+      break;
+   }
+   }
+
+   nir_def_replace(&intrin->def, value);
+   return true;
+}
+
+/* An emulated task shader's chunk (radv_task_emu_block): its workgroups are
+ * dispatched in one dimension from the chunk's first. */
+static bool
+lower_task_emulation(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
+{
+   const lower_abi_state *s = state;
+
+   if (intrin->intrinsic != nir_intrinsic_load_num_workgroups && intrin->intrinsic != nir_intrinsic_load_draw_id &&
+       intrin->intrinsic != nir_intrinsic_load_workgroup_id && intrin->intrinsic != nir_intrinsic_load_task_ring_entry_amd)
       return false;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_def *block = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->task_emu),
+                                           nir_imm_int(b, s->address32_hi));
+   nir_def *grid = ac_nir_load_smem(b, 3, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, grid)), 4,
+                                    ACCESS_CAN_SPECULATE);
+   nir_def *value;
+
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_num_workgroups:
+      value = grid;
+      break;
+   case nir_intrinsic_load_draw_id:
+      value = ac_nir_load_smem(b, 1, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, draw_id)), 4,
+                               ACCESS_CAN_SPECULATE);
+      break;
+   case nir_intrinsic_load_task_ring_entry_amd:
+      /* A chunk's first workgroup is a multiple of the ring's entries. */
+      value = nir_imm_int(b, 0);
+      break;
+   default: {
+      nir_def *first = ac_nir_load_smem(b, 1, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, first_workgroup)),
+                                        4, ACCESS_CAN_SPECULATE);
+      nir_def *index = nir_iadd(b, first, ac_nir_load_arg(b, &s->args->ac, s->args->ac.workgroup_ids[0]));
+      nir_def *x = nir_channel(b, grid, 0), *y = nir_channel(b, grid, 1);
+      nir_def *plane = nir_imul(b, x, y);
+      value = nir_vec3(b, nir_umod(b, index, x), nir_umod(b, nir_udiv(b, index, x), y), nir_udiv(b, index, plane));
+      break;
+   }
    }
 
    nir_def_replace(&intrin->def, value);
@@ -571,20 +655,25 @@ lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 }
 
 /* A mesh shader's workgroup count from its draw's record
- * (radv_mesh_draw_record), and what a shader that publishes its outputs reads
- * there, before the draw ID is lowered to its argument.
+ * (radv_mesh_draw_record), and what a shader that publishes its outputs or is
+ * fed by an emulated task shader reads there; an emulated task shader's
+ * workgroups and draw from its chunk's block. Before the draw ID is lowered to
+ * its argument.
  */
 bool
 radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage, uint32_t address32_hi)
 {
-   if (shader->info.stage != MESA_SHADER_MESH || !stage->info.ms.draw_records)
-      return false;
-
    lower_abi_state state = {
       .info = &stage->info,
       .args = &stage->args,
       .address32_hi = address32_hi,
    };
+
+   if (shader->info.stage == MESA_SHADER_TASK && stage->args.task_emu.used)
+      return nir_shader_intrinsics_pass(shader, lower_task_emulation, nir_metadata_control_flow, &state);
+
+   if (shader->info.stage != MESA_SHADER_MESH || !stage->info.ms.draw_records)
+      return false;
 
    return nir_shader_intrinsics_pass(shader, lower_mesh_draw_record, nir_metadata_control_flow, &state);
 }

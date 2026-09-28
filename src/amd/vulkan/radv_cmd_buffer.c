@@ -4031,7 +4031,9 @@ radv_emit_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
          radv_emit_mesh_shader(cmd_buffer);
          break;
       case MESA_SHADER_TASK:
-         radv_emit_compute_shader(pdev, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK]);
+         /* An emulated task shader goes with its dispatches (radv_task_emulation). */
+         if (cmd_buffer->gang.cs)
+            radv_emit_compute_shader(pdev, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK]);
          break;
       default:
          UNREACHABLE("invalid bind stage");
@@ -6514,7 +6516,7 @@ radv_flush_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags st
          radv_emit_descriptors_per_stage(device, cs, cmd_buffer->state.shaders[stage], descriptors_state);
       }
 
-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
          radv_emit_descriptors_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                          descriptors_state);
       }
@@ -6593,7 +6595,7 @@ radv_flush_descriptor_heaps(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFla
                                               cmd_buffer->descriptor_heaps);
       }
 
-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
          radv_emit_descriptor_heaps_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                               descriptors_state, cmd_buffer->descriptor_heaps);
       }
@@ -6770,7 +6772,7 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
          }
       }
 
-      if (internal_stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+      if ((internal_stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
          radv_emit_push_constants_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                             (uint32_t *)cmd_buffer->push_constants, va);
       }
@@ -6819,7 +6821,7 @@ radv_flush_dynamic_descriptors_offsets(struct radv_cmd_buffer *cmd_buffer, VkSha
                                  va);
    }
 
-   if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+   if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
       radv_emit_userdata_address(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                  AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
    }
@@ -6870,7 +6872,7 @@ radv_flush_dynamic_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStage
          radv_emit_userdata_address(device, cs, cmd_buffer->state.shaders[stage], AC_UD_DYNAMIC_DESCRIPTORS, va);
       }
 
-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
          radv_emit_userdata_address(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                     AC_UD_DYNAMIC_DESCRIPTORS, va);
       }
@@ -9067,6 +9069,11 @@ radv_bind_fragment_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 static void
 radv_bind_task_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *ts)
 {
+   /* Emulated task shaders run on the graphics ring, with memory of their own
+    * (radv_task_emulation). */
+   if (radv_task_emulated(radv_device_physical(radv_cmd_buffer_device(cmd_buffer))))
+      return;
+
    if (!radv_gang_init(cmd_buffer))
       return;
 
@@ -12506,7 +12513,8 @@ radv_emit_task_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
 
-   if (!task_shader || !pdev->emulate_mesh_shader_queries)
+   /* An emulated task dispatch sets it itself (radv_task_emulation). */
+   if (!task_shader || !pdev->emulate_mesh_shader_queries || !cmd_buffer->gang.cs)
       return;
 
    const uint32_t task_state_offset = radv_get_user_sgpr_loc(task_shader, AC_UD_TASK_STATE);
@@ -14088,8 +14096,10 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
    struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+   /* An emulated task shader's state goes with its dispatches (radv_task_emulation). */
+   const bool task_on_ace = task_shader && ace_cs;
 
-   assert(!task_shader || ace_cs);
+   assert(!task_shader || ace_cs || radv_task_emulated(pdev));
 
    /* A mesh shader that publishes its outputs starts the ring from zero, which
     * the last draw packet that used it leaves it at once its waves end
@@ -14101,7 +14111,7 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    }
 
    const VkShaderStageFlags stages =
-      VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | (task_shader ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
+      VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | (task_on_ace ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
 
    ASSERTED const unsigned cdw_max = radeon_check_space(device->ws, cs->b, 4096 + 128 * (drawCount - 1));
    ASSERTED const unsigned ace_cdw_max =
@@ -14134,14 +14144,14 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    if (pdev->info.gfx_level >= GFX12) {
       radv_gfx12_emit_buffered_regs(device, cs);
 
-      if (task_shader)
+      if (task_on_ace)
          radv_gfx12_emit_buffered_regs(device, cmd_buffer->gang.cs);
    }
 
    if (cmd_buffer->state.flush_bits)
       radv_emit_cache_flush(cmd_buffer);
 
-   if (task_shader) {
+   if (task_on_ace) {
       radv_gang_cache_flush(cmd_buffer);
 
       if (radv_flush_gang_leader_semaphore(cmd_buffer)) {
@@ -15344,13 +15354,285 @@ radv_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, const struct radv_dra
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS)
       radv_bind_graphics_shaders(cmd_buffer);
 
+   /* An emulated task draw writes its own (radv_task_emulation). */
+   if (cmd_buffer->state.shaders[MESA_SHADER_TASK])
+      return 0;
+
    const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
-   assert(mesh_shader && !cmd_buffer->state.shaders[MESA_SHADER_TASK]);
+   assert(mesh_shader);
 
    const struct radeon_winsys_bo *ring = radv_cmd_buffer_device(cmd_buffer)->ms_publish_ring;
    return radv_meta_mesh_draw_records(cmd_buffer, info->indirect_va, info->stride, info->count_va, info->count,
                                       MAX2(mesh_shader->info.ms.prim_parts, 1),
-                                      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0);
+                                      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0, 0, 0, 0);
+}
+
+/* Emulated task shaders (radv_task_emulated). A task draw goes in chunks of up
+ * to the task rings' entries of task workgroups; for each, on the graphics
+ * ring:
+ *
+ * - the task shader as a compute dispatch, fed the graphics state, its
+ *   workgroups in one dimension from the chunk's first (radv_task_emu_block),
+ *   writing the task rings, which are ordinary buffers here
+ *   (radv_device.task_emu_bo), entries sized to its payload;
+ * - the draw records prepass, from the draw ring's entries to the chunk's mesh
+ *   draw records (radv_mesh_draw_record), whose index in the packet is its
+ *   task workgroup's ring entry;
+ * - the mesh workgroups' draw of those records.
+ *
+ * The next chunk waits for the mesh shaders, which read the rings. An indirect
+ * draw's chunks are counted in memory: all the chunks its task workgroup
+ * limit allows are recorded, those past its workgroups empty.
+ */
+struct radv_task_emu {
+   uint64_t rings_va; /* radv_task_emu_rings */
+   uint32_t entries;  /* task workgroups a chunk holds */
+   uint64_t records_va;
+   uint64_t draw_ring_va;
+};
+
+static bool
+radv_task_emu_begin(struct radv_cmd_buffer *cmd_buffer, struct radv_task_emu *emu)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_shader *task = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+
+   if (!device->task_emu_bo) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   const uint32_t stride = align(MAX2(task->info.cs.task_payload_size, 16), 16);
+   emu->entries = MIN2(RADV_TASK_EMU_MAX_ENTRIES, 1u << util_logbase2(RADV_TASK_EMU_PAYLOAD_BYTES / stride));
+
+   const uint64_t va = radv_buffer_get_va(device->task_emu_bo);
+   emu->records_va = va + RADV_TASK_EMU_RECORDS_OFFSET;
+   emu->draw_ring_va = va + RADV_TASK_EMU_DRAW_RING_OFFSET;
+
+   struct radv_task_emu_rings rings = {0};
+   ac_build_raw_buffer_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
+                                  emu->draw_ring_va, emu->entries * AC_TASK_DRAW_ENTRY_BYTES,
+                                  rings.descriptors[RING_TS_DRAW]);
+   ac_build_raw_buffer_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
+                                  va + RADV_TASK_EMU_PAYLOAD_OFFSET, emu->entries * stride,
+                                  rings.descriptors[RING_TS_PAYLOAD]);
+
+   unsigned offset;
+   if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(rings), &rings, &offset)) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return false;
+   }
+   emu->rings_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
+
+   radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, device->task_emu_bo);
+   return true;
+}
+
+/* A graphics stage's descriptor sets, heaps, push constants and dynamic
+ * descriptors, for the stage run as a compute dispatch. */
+static void
+radv_emit_graphics_stage_for_compute(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *shader)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+   if (descriptors->need_indirect_descriptors)
+      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
+   const uint32_t dirty = descriptors->dirty;
+   descriptors->dirty = descriptors->valid;
+   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
+   descriptors->dirty = dirty;
+
+   if (shader->info.descriptor_heap)
+      radv_emit_descriptor_heaps_per_stage(device, cs, shader, descriptors, cmd_buffer->descriptor_heaps);
+
+   const struct radv_push_constant_state *push_constants =
+      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   uint64_t push_constants_va = 0;
+   if (push_constants->size)
+      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
+   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
+
+   if (descriptors->dynamic_offset_count) {
+      uint64_t va = 0;
+      radv_upload_dynamic_descriptors(cmd_buffer, descriptors, &va);
+      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS, va);
+   }
+   if (descriptors->need_dynamic_descriptors_offset_addr) {
+      uint64_t va = 0;
+      radv_upload_dynamic_descriptors_offsets(cmd_buffer, descriptors, &va);
+      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
+   }
+}
+
+/* A chunk's task shader dispatch: groups workgroups, or the workgroups at
+ * indirect_va. */
+static void
+radv_task_emu_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_task_emu *emu, uint64_t block_va,
+                       uint32_t groups, uint64_t indirect_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   const struct radv_shader *shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+
+   assert(pdev->info.gfx_level < GFX12);
+   radeon_check_space(device->ws, cs->b, 512);
+
+   cmd_buffer->queue_state.compute_scratch_size_per_wave_needed =
+      MAX2(cmd_buffer->queue_state.compute_scratch_size_per_wave_needed, shader->config.scratch_bytes_per_wave);
+   cmd_buffer->queue_state.compute_scratch_waves_wanted =
+      MAX2(cmd_buffer->queue_state.compute_scratch_waves_wanted,
+           radv_get_max_scratch_waves(device, (struct radv_shader *)shader));
+
+   radv_emit_compute_shader(pdev, cs, shader);
+   radv_emit_graphics_stage_for_compute(cmd_buffer, shader);
+
+   /* The compute state is the task shader's now: the next compute dispatch,
+    * the chunk's records prepass among them, emits its own again, even for
+    * the pipeline it last bound. */
+   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
+
+   radeon_begin(cs);
+   const uint32_t rings_loc = radv_get_user_sgpr_loc(shader, AC_UD_CS_TASK_RING_OFFSETS);
+   if (rings_loc) {
+      radeon_set_sh_reg_seq(rings_loc, 2);
+      radeon_emit(emu->rings_va);
+      radeon_emit(emu->rings_va >> 32);
+   }
+   const uint32_t entry_loc = radv_get_user_sgpr_loc(shader, AC_UD_TASK_RING_ENTRY);
+   if (entry_loc)
+      radeon_set_sh_reg(entry_loc, 0);
+   const uint32_t state_loc = radv_get_user_sgpr_loc(shader, AC_UD_TASK_STATE);
+   if (state_loc)
+      radeon_set_sh_reg(state_loc, radv_shader_query_none);
+   radeon_end();
+   radv_emit_userdata_address(device, cs, shader, AC_UD_CS_TASK_EMU, block_va);
+
+   radv_emit_cache_flush(cmd_buffer);
+
+   const struct radv_dispatch_info info = {
+      .blocks = {groups, 1, 1},
+      .indirect_va = indirect_va,
+   };
+   radv_emit_dispatch_packets(cmd_buffer, shader, &info);
+
+   /* The records prepass reads the draw ring. */
+   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
+}
+
+/* A chunk's mesh workgroups, from its draw ring's count entries or the count
+ * at count_va. */
+static void
+radv_task_emu_draw_chunk(struct radv_cmd_buffer *cmd_buffer, const struct radv_task_emu *emu, uint32_t draw_id,
+                         uint32_t count, uint64_t count_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
+   const uint64_t publish_ring =
+      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(device->ms_publish_ring) : 0;
+
+   radv_meta_mesh_draw_records(cmd_buffer, emu->draw_ring_va, AC_TASK_DRAW_ENTRY_BYTES, count_va, count,
+                               MAX2(mesh_shader->info.ms.prim_parts, 1), publish_ring, emu->records_va,
+                               (uint32_t)emu->rings_va, draw_id);
+   radv_emit_cache_flush(cmd_buffer);
+
+   radeon_check_space(device->ws, cs->b, 64);
+   radv_emit_indirect_buffer(cs, emu->records_va, false);
+   radv_emit_userdata_address(device, cs, mesh_shader, AC_UD_VS_MS_DRAW_RECORDS, emu->records_va);
+   radv_cs_emit_indirect_draw_packet(cmd_buffer, false, count, count_va, sizeof(struct radv_mesh_draw_record), true);
+
+   /* The next chunk writes the rings the mesh shaders read, and starts the
+    * publish ring from zero. */
+   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH;
+}
+
+/* The application's compute state comes back before its next dispatch. */
+static void
+radv_task_emu_end(struct radv_cmd_buffer *cmd_buffer)
+{
+   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
+}
+
+static void
+radv_task_emu_draw_direct(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint32_t z)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
+   const uint32_t view_mask = cmd_buffer->state.render.view_mask;
+   struct radv_task_emu emu;
+
+   if (!radv_task_emu_begin(cmd_buffer, &emu))
+      return;
+
+   const uint32_t workgroups = x * y * z;
+   u_foreach_bit (view, view_mask ? view_mask : 1) {
+      if (view_mask)
+         radv_emit_view_index(pdev, &cmd_buffer->state, cmd_buffer->cs, view);
+
+      for (uint32_t first = 0; first < workgroups; first += emu.entries) {
+         const uint32_t count = MIN2(emu.entries, workgroups - first);
+         const struct radv_task_emu_block block = {.grid = {x, y, z}, .first_workgroup = first};
+         unsigned offset;
+         if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(block), &block, &offset)) {
+            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+            return;
+         }
+         radv_task_emu_dispatch(cmd_buffer, &emu, radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset, count,
+                                0);
+         radv_task_emu_draw_chunk(cmd_buffer, &emu, 0, count, 0);
+      }
+   }
+   radv_task_emu_end(cmd_buffer);
+}
+
+static void
+radv_task_emu_draw_indirect(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
+   const uint32_t view_mask = cmd_buffer->state.render.view_mask;
+   struct radv_task_emu emu;
+
+   if (!radv_task_emu_begin(cmd_buffer, &emu))
+      return;
+
+   /* Every chunk the task workgroup limit allows (maxTaskWorkGroupTotalCount),
+    * set up for a batch of draws at a time. */
+   const uint32_t chunks = DIV_ROUND_UP(1u << 22, emu.entries);
+   const uint32_t batch = MAX2(4096 / chunks, 1);
+
+   u_foreach_bit (view, view_mask ? view_mask : 1) {
+      if (view_mask)
+         radv_emit_view_index(pdev, &cmd_buffer->state, cmd_buffer->cs, view);
+
+      for (uint32_t first_draw = 0; first_draw < info->count; first_draw += batch) {
+         const uint32_t draws = MIN2(batch, info->count - first_draw);
+         unsigned offset;
+         if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, draws * chunks * 48, 16, &offset, NULL)) {
+            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+            return;
+         }
+         const uint64_t out_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
+         radv_meta_task_chunks(cmd_buffer, info->indirect_va, info->stride, info->count_va, first_draw, draws,
+                               chunks, emu.entries, out_va);
+
+         for (uint32_t i = 0; i < draws * chunks; i++) {
+            const uint64_t block_va = out_va + i * sizeof(struct radv_task_emu_block);
+            const uint64_t args_va = out_va + draws * chunks * sizeof(struct radv_task_emu_block) + i * 16;
+            radv_task_emu_dispatch(cmd_buffer, &emu, block_va, 0, args_va);
+            radv_task_emu_draw_chunk(cmd_buffer, &emu, first_draw + i / chunks, emu.entries, args_va);
+         }
+      }
+   }
+   radv_task_emu_end(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -15373,7 +15655,9 @@ radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, 1, false))
       return;
 
-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
+      radv_task_emu_draw_direct(cmd_buffer, x, y, z);
+   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
       radv_emit_direct_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, x, y, z);
    } else {
       radv_emit_direct_mesh_draw_packet(cmd_buffer, x, y, z);
@@ -15421,13 +15705,15 @@ radv_CmdDrawMeshTasksIndirect2EXT(VkCommandBuffer commandBuffer, const VkDrawInd
    info.instance_count = 0;
 
    const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
-   if (radv_mesh_draw_records_enabled(pdev) && !records_va)
+   if (radv_mesh_draw_records_enabled(pdev) && !records_va && !cmd_buffer->state.shaders[MESA_SHADER_TASK])
       return;
 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->drawCount, false))
       return;
 
-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
+      radv_task_emu_draw_indirect(cmd_buffer, &info);
+   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
       radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info, 0);
    } else if (records_va) {
       radv_emit_mesh_draw_records_packets(pdev, cmd_buffer, &info, records_va);
@@ -15482,13 +15768,15 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
    info.instance_count = 0;
 
    const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
-   if (radv_mesh_draw_records_enabled(pdev) && !records_va)
+   if (radv_mesh_draw_records_enabled(pdev) && !records_va && !cmd_buffer->state.shaders[MESA_SHADER_TASK])
       return;
 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->maxDrawCount, false))
       return;
 
-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
+      radv_task_emu_draw_indirect(cmd_buffer, &info);
+   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
       uint64_t workaround_cond_va = 0;
 
       if (pdev->info.has_taskmesh_indirect0_bug && info.count_va) {

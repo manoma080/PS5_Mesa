@@ -1438,7 +1438,7 @@ radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void)
  */
 static void
 mesh_draw_record(nir_builder *b, nir_def *draw, nir_def *records_addr, nir_def *parts, nir_def *ring,
-                 nir_def *first_workgroup, nir_def *grid)
+                 nir_def *first_workgroup, nir_def *grid, nir_def *task_rings, nir_def *task_draw_id)
 {
    /* A vertex launches a workgroup, or each of its parts. */
    nir_def *vertices = nir_imul(b, nir_imul(b, nir_channel(b, grid, 0), nir_channel(b, grid, 1)),
@@ -1453,6 +1453,8 @@ mesh_draw_record(nir_builder *b, nir_def *draw, nir_def *records_addr, nir_def *
    nir_build_store_global(b, nir_vec4(b, nir_unpack_64_2x32_split_x(b, first_workgroup),
                                       nir_unpack_64_2x32_split_y(b, first_workgroup), zero, zero),
                           nir_iadd_imm(b, record_addr, 32), .align_mul = 16);
+   nir_build_store_global(b, nir_vec4(b, task_rings, task_draw_id, zero, zero), nir_iadd_imm(b, record_addr, 48),
+                          .align_mul = 16);
 }
 
 static nir_def *
@@ -1465,10 +1467,12 @@ mesh_draw_grid(nir_builder *b, nir_def *draw, nir_def *indirect_addr, nir_def *s
 nir_shader *
 radv_meta_nir_build_mesh_draw_records_cs(void)
 {
-   static_assert(sizeof(struct radv_mesh_draw_record) == 48 && offsetof(struct radv_mesh_draw_record, grid) == 16 &&
+   static_assert(sizeof(struct radv_mesh_draw_record) == 64 && offsetof(struct radv_mesh_draw_record, grid) == 16 &&
                     offsetof(struct radv_mesh_draw_record, publish_ring) == 28 &&
                     offsetof(struct radv_mesh_draw_record, first_workgroup) == 32 &&
-                    offsetof(struct radv_mesh_draw_record, workgroups) == 40,
+                    offsetof(struct radv_mesh_draw_record, workgroups) == 40 &&
+                    offsetof(struct radv_mesh_draw_record, task_rings) == 48 &&
+                    offsetof(struct radv_mesh_draw_record, task_draw_id) == 52,
                  "the stores below");
 
    nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_mesh_draw_records_cs");
@@ -1484,6 +1488,8 @@ radv_meta_nir_build_mesh_draw_records_cs(void)
    nir_def *max_count = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
    nir_def *parts = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
    nir_def *ring = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 36, .range = 4);
+   nir_def *task_rings = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 40, .range = 4);
+   nir_def *task_draw_id = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 44, .range = 4);
 
    /* Only the draws the count buffer has. */
    nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
@@ -1496,7 +1502,8 @@ radv_meta_nir_build_mesh_draw_records_cs(void)
       nir_push_if(&b, nir_ult(&b, global_id, count));
       {
          nir_def *grid = mesh_draw_grid(&b, global_id, indirect_addr, stride);
-         mesh_draw_record(&b, global_id, records_addr, parts, ring, nir_imm_int64(&b, 0), grid);
+         mesh_draw_record(&b, global_id, records_addr, parts, ring, nir_imm_int64(&b, 0), grid, task_rings,
+                          task_draw_id);
       }
       nir_pop_if(&b, NULL);
    }
@@ -1531,7 +1538,7 @@ radv_meta_nir_build_mesh_draw_records_cs(void)
 
          nir_push_if(&b, active);
          mesh_draw_record(&b, draw, records_addr, parts, ring, nir_iadd(&b, workgroups, nir_u2u64(&b, before)),
-                          grid);
+                          grid, task_rings, task_draw_id);
          nir_pop_if(&b, NULL);
 
          nir_store_var(&b, workgroups_var, nir_iadd(&b, workgroups, nir_u2u64(&b, sum)), 0x1);
@@ -1549,6 +1556,75 @@ radv_meta_nir_build_mesh_draw_records_cs(void)
                                 .align_mul = 8);
       }
       nir_pop_if(&b, NULL);
+   }
+   nir_pop_if(&b, NULL);
+
+   return b.shader;
+}
+
+/* radv_meta_task_chunks: for an emulated indirect task draw (radv_task_emulated),
+ * each draw's chunks of up to entries task workgroups: the chunk's block
+ * (radv_task_emu_block) and its dispatch's workgroups, 0 past the draw's, which
+ * the chunk's records and draw take as their count. An invocation a chunk.
+ */
+nir_shader *
+radv_meta_nir_build_task_chunks_cs(void)
+{
+   static_assert(sizeof(struct radv_task_emu_block) == 32 && offsetof(struct radv_task_emu_block, draw_id) == 12 &&
+                    offsetof(struct radv_task_emu_block, first_workgroup) == 16,
+                 "the stores below");
+
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_task_chunks_cs");
+   b.shader->info.workgroup_size[0] = 64;
+
+   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
+
+   nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
+   nir_def *count_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 8, .range = 8);
+   nir_def *out_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
+   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
+   nir_def *draws = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
+   nir_def *chunks = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
+   nir_def *entries = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 36, .range = 4);
+   nir_def *first_draw = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 40, .range = 4);
+
+   nir_def *total = nir_imul(&b, draws, chunks);
+   nir_push_if(&b, nir_ult(&b, global_id, total));
+   {
+      nir_def *draw = nir_iadd(&b, first_draw, nir_udiv(&b, global_id, chunks));
+      nir_def *chunk = nir_umod(&b, global_id, chunks);
+
+      /* Only the draws the count buffer has. */
+      nir_def *all = nir_iadd(&b, first_draw, draws);
+      nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
+      nir_def *count = nir_umin(&b, nir_build_load_global(&b, 1, 32, count_addr, .align_mul = 4), all);
+      nir_pop_if(&b, NULL);
+      count = nir_if_phi(&b, count, all);
+
+      nir_def *no_grid = nir_imm_zero(&b, 3, 32);
+      nir_push_if(&b, nir_ult(&b, draw, count));
+      nir_def *grid = nir_build_load_global(
+         &b, 3, 32, nir_iadd(&b, indirect_addr, nir_imul(&b, nir_u2u64(&b, draw), nir_u2u64(&b, stride))),
+         .align_mul = 4);
+      nir_pop_if(&b, NULL);
+      grid = nir_if_phi(&b, grid, no_grid);
+
+      nir_def *workgroups =
+         nir_imul(&b, nir_imul(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1)), nir_channel(&b, grid, 2));
+      nir_def *first = nir_imul(&b, chunk, entries);
+      nir_def *groups = nir_umin(&b, nir_usub_sat(&b, workgroups, first), entries);
+
+      nir_def *block_addr = nir_iadd(&b, out_addr, nir_u2u64(&b, nir_imul_imm(&b, global_id, 32)));
+      nir_build_store_global(&b, nir_vec4(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1),
+                                          nir_channel(&b, grid, 2), draw),
+                             block_addr, .align_mul = 16);
+      nir_build_store_global(&b, nir_pad_vector_imm_int(&b, first, 0, 4), nir_iadd_imm(&b, block_addr, 16),
+                             .align_mul = 16);
+
+      nir_def *args_addr = nir_iadd(&b, nir_iadd(&b, out_addr, nir_u2u64(&b, nir_imul_imm(&b, total, 32))),
+                                    nir_u2u64(&b, nir_imul_imm(&b, global_id, 16)));
+      nir_def *one = nir_imm_int(&b, 1);
+      nir_build_store_global(&b, nir_vec4(&b, groups, one, one, nir_imm_int(&b, 0)), args_addr, .align_mul = 16);
    }
    nir_pop_if(&b, NULL);
 

@@ -662,6 +662,8 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
 
       if (stage == MESA_SHADER_TASK) {
          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.task_ring_entry, AC_UD_TASK_RING_ENTRY);
+         if (compiler_info->key.task_emulation)
+            RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, task_emu, AC_UD_CS_TASK_EMU);
 
          if (has_shader_query) {
             RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, task_state, AC_UD_TASK_STATE);

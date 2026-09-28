@@ -69,6 +69,13 @@ radv_perf_query_supported(const struct radv_physical_device *pdev)
           !(instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
 }
 
+bool
+radv_task_emulated(const struct radv_physical_device *pdev)
+{
+   return radv_mesh_draw_records_enabled(pdev) && !radv_compute_queue_enabled(pdev) &&
+          debug_get_bool_option("RADV_PS5_TASK", false);
+}
+
 static bool
 radv_taskmesh_enabled(const struct radv_physical_device *pdev)
 {
@@ -77,7 +84,8 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
    if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
       return false;
 
-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 &&
+          (radv_compute_queue_enabled(pdev) || radv_task_emulated(pdev));
 }
 
 /* Mesh shaders without task shaders, which RADV runs on an asynchronous

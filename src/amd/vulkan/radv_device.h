@@ -178,6 +178,11 @@ struct radv_device {
     * primitives go out in parts (radv_ms_publishes, AC_MS_PUBLISH_RING_BYTES). */
    struct radeon_winsys_bo *ms_publish_ring;
 
+   /* Emulated task shaders' memory (radv_task_emulated): a chunk's mesh draw
+    * records, its task draw ring and its task payload ring, one chunk at a
+    * time (RADV_TASK_EMU_*). */
+   struct radeon_winsys_bo *task_emu_bo;
+
    struct radeon_winsys_bo *trace_bo;
    struct radv_trace_data *trace_data;
 

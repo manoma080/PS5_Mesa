@@ -248,6 +248,10 @@ struct radv_shader_info {
       bool has_query : 1; /* Task shader only */
 
       uint32_t derivative_group : 2;
+
+      /* Task shader only: its payload's bytes, which size an emulated task
+       * draw's rings (radv_task_emulated). */
+      uint32_t task_payload_size;
    } cs;
    struct {
       ac_nir_tess_io_info io_info;
