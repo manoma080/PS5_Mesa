@@ -14145,7 +14145,7 @@ radv_gs_compute_heap(struct radv_cmd_buffer *cmd_buffer)
 
       const struct poly_heap header = {
          .base = va + RADV_GS_COMPUTE_HEAP_HEADER,
-         .size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER,
+         .size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER - RADV_GS_COMPUTE_HEAP_GUARD,
       };
       radv_write_data(cmd_buffer, V_371_MICRO_ENGINE, va, sizeof(header) / 4, (const uint32_t *)&header, false);
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
@@ -14363,8 +14363,10 @@ radv_gs_compute_run_passes(struct radv_cmd_buffer *cmd_buffer, const struct radv
    if (xfb_offsets_va)
       radv_gs_compute_save_streamout(cmd_buffer, xfb_offsets_va);
 
-   const struct radv_shader *vs = gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)];
-   if (!vs && gsc->deferred_vs) {
+   /* After tessellation, the evaluation shader is the vertex stage. */
+   const struct radv_shader *vs =
+      gsc->shaders[radv_gs_compute_index(gsc->tess.used ? RADV_GS_COMPUTE_TES : RADV_GS_COMPUTE_VS)];
+   if (!vs && !gsc->tess.used && gsc->deferred_vs) {
       struct radv_graphics_state_key vi_key;
       radv_gs_compute_vi_key(cmd_buffer, &vi_key);
       vs = radv_gs_compute_deferred_vs_get(radv_cmd_buffer_device(cmd_buffer), gsc->deferred_vs, &vi_key);
@@ -14492,14 +14494,23 @@ radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compu
       RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
 }
 
+/* The tessellator's output, which the geometry shader's passes draw after
+ * tessellation: its primitives and the tessellation parameters the
+ * evaluation shader reads. */
+struct radv_gs_compute_tess_stream {
+   enum mesa_prim mode;
+   uint64_t params_va;
+};
+
 /* A draw whose counts live in memory: draw_va holds a
  * VkDraw[Indexed]IndirectCommand, draw_count_va (if not 0) the count of an
  * indirect count draw, byte_count_va (if not 0) the counter of a byte count
- * draw. */
+ * draw. With tess, the draw is the tessellator's output. */
 static void
 radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
                          bool indexed, uint64_t draw_va, uint64_t draw_count_va, uint32_t draw_index,
-                         uint64_t byte_count_va, uint32_t byte_offset, uint32_t byte_stride)
+                         uint64_t byte_count_va, uint32_t byte_offset, uint32_t byte_stride,
+                         const struct radv_gs_compute_tess_stream *tess)
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
    const struct radv_dynamic_state *d = &state->dynamic;
@@ -14508,9 +14519,9 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
    if (!heap_va)
       return;
    const uint64_t heap_base = heap_va + RADV_GS_COMPUTE_HEAP_HEADER;
-   const uint32_t heap_size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER;
+   const uint32_t heap_size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER - RADV_GS_COMPUTE_HEAP_GUARD;
 
-   enum mesa_prim mode = radv_gs_compute_input_prim(d->vk.ia.primitive_topology);
+   enum mesa_prim mode = tess ? tess->mode : radv_gs_compute_input_prim(d->vk.ia.primitive_topology);
    uint64_t index_va = 0;
    uint32_t index_range_el = 0, index_size = 0;
    if (indexed) {
@@ -14528,7 +14539,7 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
 
    /* Primitive restart: first an indexed draw of the decomposed list
     * topology without restarts, in the heap. */
-   if (indexed && d->vk.ia.primitive_restart_enable) {
+   if (indexed && d->vk.ia.primitive_restart_enable && !tess) {
       const uint64_t sink = radv_gs_compute_upload(cmd_buffer, 256, NULL, NULL);
       const struct radv_gs_compute_unroll unroll = {
          .draw = draw_va,
@@ -14555,9 +14566,12 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
    }
 
    const uint64_t xfb_offsets_va = radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
+   const uint64_t vertex_outputs = tess ? gsc->tess.tes_outputs : gsc->vs_outputs;
+   vp.outputs = vertex_outputs;
    const uint64_t gp_va = radv_gs_compute_upload(cmd_buffer, sizeof(gp), &gp, NULL);
    block.vertex_params = radv_gs_compute_upload(cmd_buffer, sizeof(vp), &vp, NULL);
    block.geometry_params = gp_va;
+   block.tess_params = tess ? tess->params_va : 0;
    block.draw_id = draw_index;
    const uint64_t block_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
 
@@ -14568,7 +14582,7 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
       .block = block_va,
       .heap = heap_va,
       .index_buffer = index_va,
-      .vs_outputs = gsc->vs_outputs,
+      .vs_outputs = vertex_outputs,
       .index_buffer_range_el = index_range_el,
       .index_size_B = index_size,
       .draw_index = draw_index,
@@ -14598,6 +14612,157 @@ radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
                              gp_va + offsetof(struct poly_geometry_params, draw));
 }
 
+/* One meta pass over the argument block at args_va, of the workgroup counts
+ * at groups_va. */
+static void
+radv_gs_compute_meta_pass_indirect(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compute_meta meta,
+                                   uint64_t args_va, uint64_t groups_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   VkPipelineLayout layout;
+   VkPipeline pipeline;
+
+   VkResult result = radv_gs_compute_get_meta_pipeline(device, meta, &pipeline, &layout);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      return;
+   }
+
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args_va), &args_va);
+   const struct radv_dispatch_info info = {.indirect_va = groups_va};
+   radv_compute_dispatch(cmd_buffer, &info);
+
+   cmd_buffer->state.flush_bits |=
+      RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
+}
+
+/* A tessellated draw (radv_gs_compute.h): draw_va holds the application's
+ * VkDraw[Indexed]IndirectCommand, draw_count_va and byte_count_va as for
+ * radv_gs_compute_draw_gpu. A setup pass sizes the vertex and tessellation
+ * control passes and the tessellator; the tessellator's output is then drawn
+ * by the geometry shader's passes, the evaluation shader their vertex
+ * stage. */
+static void
+radv_gs_compute_draw_tess(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
+                          bool indexed, uint64_t draw_va, uint64_t draw_count_va, uint32_t draw_index,
+                          uint64_t byte_count_va, uint32_t byte_offset, uint32_t byte_stride)
+{
+   struct radv_cmd_state *state = &cmd_buffer->state;
+   const struct radv_dynamic_state *d = &state->dynamic;
+   const struct radv_gs_compute_tess_info *tess = &gsc->tess;
+
+   const uint64_t heap_va = radv_gs_compute_heap(cmd_buffer);
+   if (!heap_va)
+      return;
+
+   uint64_t index_va = 0;
+   uint32_t index_range_el = 0, index_size = 0;
+   if (indexed) {
+      index_size = radv_get_vgt_index_size(state->index_buffer.index_type);
+      index_va = state->index_buffer.va;
+      index_range_el = state->index_buffer.max_index_count;
+   }
+
+   /* What the pipeline and the dynamic state fix; the setup pass fills in the
+    * draw's patches and their buffers. The tessellator writes clockwise
+    * triangles, which the evaluation shader turns around (poly_load_tes_index)
+    * for counter-clockwise ones in the orientation the domain origin sets. */
+   const bool triangles = !tess->points && tess->prim != TESS_PRIMITIVE_ISOLINES;
+   const uint64_t out_draw_va = radv_gs_compute_upload(cmd_buffer, sizeof(VkDrawIndirectCommand), NULL, NULL);
+   const struct poly_tess_params params = {
+      .heap = heap_va,
+      .patch_coord_buffer = heap_va + RADV_GS_COMPUTE_HEAP_HEADER,
+      .out_draws = out_draw_va,
+      .tcs_per_vertex_outputs = tess->per_vertex_outputs,
+      .input_patch_size = MAX2(d->vk.ts.patch_control_points, 1),
+      .output_patch_size = tess->output_patch_size,
+      .tcs_patch_constants = tess->patch_outputs,
+      .tcs_stride_el = tess->tcs_stride_B / 4,
+      .partitioning = tess->spacing == TESS_SPACING_EQUAL            ? POLY_TESS_PARTITIONING_INTEGER
+                      : tess->spacing == TESS_SPACING_FRACTIONAL_ODD ? POLY_TESS_PARTITIONING_FRACTIONAL_ODD
+                                                                     : POLY_TESS_PARTITIONING_FRACTIONAL_EVEN,
+      .points_mode = tess->points,
+      .isolines = tess->prim == TESS_PRIMITIVE_ISOLINES,
+      .ccw = triangles && (tess->ccw ^ (d->vk.ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT)),
+   };
+   const uint64_t params_va = radv_gs_compute_upload(cmd_buffer, sizeof(params), &params, NULL);
+
+   /* The vertex and tessellation control passes' block. */
+   struct poly_vertex_params vp;
+   const uint32_t wg_size[3] = {RADV_GS_COMPUTE_WAVE, 1, 1};
+   poly_vertex_params_init(&vp, gsc->vs_outputs, wg_size);
+   const struct radv_gs_compute_draw block = {
+      .vertex_params = radv_gs_compute_upload(cmd_buffer, sizeof(vp), &vp, NULL),
+      .tess_params = params_va,
+      .ro_sink = radv_gs_compute_upload(cmd_buffer, 256, NULL, NULL),
+      .input_topology = MESA_PRIM_PATCHES,
+      .provoking_last = d->vk.rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
+      .rasterization_stream = d->vk.rs.rasterization_stream,
+      .draw_id = draw_index,
+   };
+   const uint64_t block_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
+
+   const struct radv_gs_compute_tess_setup setup = {
+      .draw = draw_va,
+      .draw_count = draw_count_va,
+      .byte_count = byte_count_va,
+      .block = block_va,
+      .heap = heap_va,
+      .index_buffer = index_va,
+      .index_buffer_range_el = index_range_el,
+      .index_size_B = index_size,
+      .draw_index = draw_index,
+      .byte_offset = byte_offset,
+      .byte_stride = byte_stride,
+   };
+   const uint64_t setup_va = radv_gs_compute_upload(cmd_buffer, sizeof(setup), &setup, NULL);
+
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
+   radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_TESS_SETUP, setup_va, 1);
+   radv_meta_end(cmd_buffer);
+
+   const struct radv_shader *vs = gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)];
+   if (!vs && gsc->deferred_vs) {
+      struct radv_graphics_state_key vi_key;
+      radv_gs_compute_vi_key(cmd_buffer, &vi_key);
+      vs = radv_gs_compute_deferred_vs_get(radv_cmd_buffer_device(cmd_buffer), gsc->deferred_vs, &vi_key);
+      if (!vs)
+         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   radv_gs_compute_dispatch(cmd_buffer, vs, block_va, 0, 0,
+                            setup_va + offsetof(struct radv_gs_compute_tess_setup, vs_groups));
+   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_TCS)], block_va, 0, 0,
+                            setup_va + offsetof(struct radv_gs_compute_tess_setup, tcs_groups));
+
+   /* The tessellator: each patch's index count, their prefix sum and the index
+    * buffer, then the indices and the domain points. */
+   const enum radv_gs_compute_meta tessellate = tess->prim == TESS_PRIMITIVE_ISOLINES ? RADV_GS_COMPUTE_META_TESS_ISOLINES
+                                                : tess->prim == TESS_PRIMITIVE_TRIANGLES
+                                                   ? RADV_GS_COMPUTE_META_TESS_TRIANGLES
+                                                   : RADV_GS_COMPUTE_META_TESS_QUADS;
+   const struct radv_gs_compute_tessellate count = {.params = params_va, .mode = POLY_TESS_MODE_COUNT};
+   const struct radv_gs_compute_tessellate write = {.params = params_va, .mode = POLY_TESS_MODE_WITH_COUNTS};
+   const uint64_t tess_groups = setup_va + offsetof(struct radv_gs_compute_tess_setup, tess_groups);
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
+   radv_gs_compute_meta_pass_indirect(cmd_buffer, tessellate,
+                                      radv_gs_compute_upload(cmd_buffer, sizeof(count), &count, NULL), tess_groups);
+   radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_TESS_PREFIX_SUM, params_va, RADV_GS_COMPUTE_WAVE);
+   radv_gs_compute_meta_pass_indirect(cmd_buffer, tessellate,
+                                      radv_gs_compute_upload(cmd_buffer, sizeof(write), &write, NULL), tess_groups);
+   radv_meta_end(cmd_buffer);
+
+   const struct radv_gs_compute_tess_stream stream = {
+      .mode = tess->points                             ? MESA_PRIM_POINTS
+              : tess->prim == TESS_PRIMITIVE_ISOLINES ? MESA_PRIM_LINES
+                                                       : MESA_PRIM_TRIANGLES,
+      .params_va = params_va,
+   };
+   radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, out_draw_va, 0, draw_index, 0, 0, 0, &stream);
+}
+
 static const struct radv_gs_compute_pipeline *
 radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -14621,12 +14786,29 @@ radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_
    if (!info->count || !info->instance_count)
       return true;
 
+   /* Tessellation's counts are the tessellator's: the GPU sizes the rest. */
+   if (gsc->tess.used) {
+      if (info->indexed) {
+         const VkDrawIndexedIndirectCommand args = {info->count, info->instance_count, first, vertex_offset,
+                                                    info->first_instance};
+         radv_gs_compute_draw_tess(cmd_buffer, gsc, true,
+                                   radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL), 0, draw_id, 0, 0,
+                                   0);
+      } else {
+         const VkDrawIndirectCommand args = {info->count, info->instance_count, first, info->first_instance};
+         radv_gs_compute_draw_tess(cmd_buffer, gsc, false,
+                                   radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL), 0, draw_id, 0, 0,
+                                   0);
+      }
+      return true;
+   }
+
    /* Primitive restart needs the index values: the GPU unrolls them. */
    if (info->indexed && d->vk.ia.primitive_restart_enable) {
       const VkDrawIndexedIndirectCommand args = {info->count, info->instance_count, first, vertex_offset,
                                                  info->first_instance};
       radv_gs_compute_draw_gpu(cmd_buffer, gsc, true, radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL),
-                               0, draw_id, 0, 0, 0);
+                               0, draw_id, 0, 0, 0, NULL);
       return true;
    }
 
@@ -14686,9 +14868,13 @@ radv_gs_compute_draw_indirect(struct radv_cmd_buffer *cmd_buffer, const struct r
    if (!gsc)
       return false;
 
-   for (uint32_t i = 0; i < info->count; i++)
-      radv_gs_compute_draw_gpu(cmd_buffer, gsc, info->indexed, info->indirect_va + (uint64_t)i * info->stride,
-                               info->count_va, i, 0, 0, 0);
+   for (uint32_t i = 0; i < info->count; i++) {
+      const uint64_t draw_va = info->indirect_va + (uint64_t)i * info->stride;
+      if (gsc->tess.used)
+         radv_gs_compute_draw_tess(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0);
+      else
+         radv_gs_compute_draw_gpu(cmd_buffer, gsc, info->indexed, draw_va, info->count_va, i, 0, 0, 0, NULL);
+   }
    return true;
 }
 
@@ -17462,8 +17648,13 @@ radv_CmdDrawIndirectByteCount2EXT(VkCommandBuffer commandBuffer, uint32_t instan
    const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
    if (gsc) {
       const VkDrawIndirectCommand args = {0, instanceCount, 0, firstInstance};
-      radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL),
-                               0, 0, pCounterInfo->addressRange.address, counterOffset, vertexStride);
+      const uint64_t args_va = radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL);
+      if (gsc->tess.used)
+         radv_gs_compute_draw_tess(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
+                                   counterOffset, vertexStride);
+      else
+         radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, args_va, 0, 0, pCounterInfo->addressRange.address,
+                                  counterOffset, vertexStride, NULL);
       return;
    }
 

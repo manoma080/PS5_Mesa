@@ -2824,8 +2824,11 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
          if (!gs_compute_nir.nir[i])
             continue;
          const enum radv_gs_compute_kind kind = RADV_GS_COMPUTE_VS + i;
-         const struct radv_shader_stage *api_stage =
-            &stages[kind == RADV_GS_COMPUTE_VS ? MESA_SHADER_VERTEX : MESA_SHADER_GEOMETRY];
+         const mesa_shader_stage api_stage_index = kind == RADV_GS_COMPUTE_VS    ? MESA_SHADER_VERTEX
+                                                   : kind == RADV_GS_COMPUTE_TCS ? MESA_SHADER_TESS_CTRL
+                                                   : kind == RADV_GS_COMPUTE_TES ? MESA_SHADER_TESS_EVAL
+                                                                                 : MESA_SHADER_GEOMETRY;
+         const struct radv_shader_stage *api_stage = &stages[api_stage_index];
          /* With a dynamic vertex input, the vertex pass waits for the draw's. */
          if (kind == RADV_GS_COMPUTE_VS && api_gfx_state->vs.has_prolog) {
             struct blob blob;
@@ -2842,6 +2845,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       }
       gs_compute->info = gs_compute_nir.info;
       gs_compute->vs_outputs = gs_compute_nir.vs_outputs;
+      gs_compute->tess = gs_compute_nir.tess;
       gs_compute->used = true;
    }
 }
@@ -3118,6 +3122,7 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       if (pipeline->base.gs_compute) {
          pipeline->base.gs_compute->info = gs_compute.info;
          pipeline->base.gs_compute->vs_outputs = gs_compute.vs_outputs;
+         pipeline->base.gs_compute->tess = gs_compute.tess;
          if (gs_compute.vs_nir) {
             pipeline->base.gs_compute->deferred_vs = radv_gs_compute_deferred_vs_create(
                device, &gs_compute, &gfx_state->layout, &gfx_state->key.gfx_state);

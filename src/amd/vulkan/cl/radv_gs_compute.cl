@@ -7,26 +7,41 @@
 /* RADV's OpenCL helpers for geometry shaders run as compute, turned into NIR
  * builder functions by vtn_bindgen2 as poly's are (radv_gs_compute_abi.h). */
 
+/* poly's allocations that do not fit go to the guard past the heap's end
+ * (RADV_GS_COMPUTE_HEAP_GUARD) instead of aborting, which RADV's shaders
+ * cannot. */
+#define POLY_HEAP_GUARD 1
+
 #include "compiler/libcl/libcl.h"
+#include "poly/cl/tessellator.h"
 #include "poly/geometry.h"
 #include "poly/prim.h"
 #include "radv_gs_compute_abi.h"
 
 /* A bump allocation from the command buffer's heap, or false when it does
- * not fit: the draw then draws nothing rather than write out of bounds. */
+ * not fit: the draw then draws nothing rather than write out of bounds. A
+ * failed allocation leaves heap->bottom past heap->size, as poly's do. */
 static bool
 heap_alloc(global struct poly_heap *heap, uint64_t size_B, uint *offs_B)
 {
-   if (size_B > heap->size)
+   if (size_B > heap->size) {
+      atomic_fetch_max((volatile atomic_uint *)(&heap->bottom), heap->size + 16);
       return false;
+   }
 
-   uint size = align((uint)size_B, 16);
-   uint offs = atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size);
-   if (offs > heap->size - size)
+   uint offs = poly_heap_alloc_offs(heap, (uint)size_B);
+   if (offs == heap->size)
       return false;
 
    *offs_B = offs;
    return true;
+}
+
+/* Whether an allocation of this draw's or an earlier one's did not fit. */
+static bool
+heap_overflowed(global struct poly_heap *heap)
+{
+   return heap->bottom > heap->size;
 }
 
 void
@@ -61,8 +76,10 @@ radv_gs_compute_setup(global struct radv_gs_compute_setup *s)
    uint64_t count_B = input_prims * p->count_buffer_stride;
    uint64_t index_B = shape == POLY_GS_SHAPE_DYNAMIC_INDEXED ? input_prims * s->max_indices * 4 : 0;
 
+   /* After tessellation, the domain points went to the guard if the heap
+    * overflowed: nothing reads them. */
    uint vs_offs = 0, count_offs = 0, index_offs = 0;
-   bool ok = vertex_count && instance_count && vertex_count <= INT32_MAX &&
+   bool ok = !heap_overflowed(heap) && vertex_count && instance_count && vertex_count <= INT32_MAX &&
              input_prims * max(s->max_indices, 1u) <= UINT32_MAX && heap_alloc(heap, vs_B, &vs_offs) &&
              (!count_B || heap_alloc(heap, count_B, &count_offs)) &&
              (!index_B || heap_alloc(heap, index_B, &index_offs));
@@ -210,4 +227,143 @@ radv_gs_compute_prefix_sum(global struct poly_geometry_params *p)
          counts[i * words + word] = sum;
       carry = sub_group_broadcast(sum, RADV_GS_COMPUTE_WAVE - 1);
    }
+}
+
+/* Tessellation: the vertex shader, the tessellation control shader and
+ * poly's tessellator run as compute, and the tessellation evaluation shader
+ * runs as the vertex stage of the geometry shader's passes over the
+ * tessellator's output (radv_gs_compute.h). */
+void
+radv_gs_compute_tess_setup(global struct radv_gs_compute_tess_setup *s)
+{
+   global uint32_t *draw = s->draw;
+   global struct radv_gs_compute_draw *block = s->block;
+   global struct poly_vertex_params *vp = block->vertex_params;
+   global struct poly_tess_params *p = block->tess_params;
+   global struct poly_heap *heap = s->heap;
+   const bool indexed = s->index_size_B != 0;
+
+   uint count = draw[0];
+   uint instance_count = draw[1];
+   if (s->byte_count) {
+      uint counter = *s->byte_count;
+      count = counter > s->byte_offset ? (counter - s->byte_offset) / s->byte_stride : 0;
+   }
+   if (s->draw_count && s->draw_index >= *s->draw_count)
+      count = 0;
+
+   block->first_vertex = indexed ? draw[3] : draw[2];
+   block->base_instance = indexed ? draw[4] : draw[3];
+
+   /* Only whole patches are drawn, and only their vertices shaded. */
+   uint in_patches = count / p->input_patch_size;
+   uint vertices = in_patches * p->input_patch_size;
+   uint64_t patches = (uint64_t)in_patches * instance_count;
+   uint64_t vs_B = (uint64_t)vertices * instance_count * util_bitcount64(vp->outputs) * 16;
+   uint64_t tcs_B = patches * p->tcs_stride_el * 4;
+
+   uint vs_offs = 0, tcs_offs = 0, coord_offs = 0, count_offs = 0;
+   bool ok = in_patches && instance_count && patches <= UINT32_MAX / 4 && heap_alloc(heap, vs_B, &vs_offs) &&
+             heap_alloc(heap, tcs_B, &tcs_offs) && heap_alloc(heap, patches * 4, &coord_offs) &&
+             heap_alloc(heap, patches * 4, &count_offs);
+   if (!ok) {
+      in_patches = 0;
+      vertices = 0;
+      instance_count = 0;
+      patches = 0;
+   }
+
+   poly_vertex_params_set_draw(vp, vertices, instance_count);
+   p->patches_per_instance = in_patches;
+   p->nr_patches = patches;
+   if (ok) {
+      vp->output_buffer = (uintptr_t)(heap->base + vs_offs);
+      if (indexed) {
+         vp->index_size_B = s->index_size_B;
+         vp->index_buffer = draw[2] < s->index_buffer_range_el
+                               ? s->index_buffer + (uint64_t)draw[2] * s->index_size_B
+                               : block->ro_sink;
+         vp->index_buffer_range_el = poly_index_buffer_range_el(s->index_buffer_range_el, draw[2]);
+      }
+      p->tcs_buffer = (global float *)(heap->base + tcs_offs);
+      p->coord_allocs = (global uint *)(heap->base + coord_offs);
+      p->counts = (global uint *)(heap->base + count_offs);
+   }
+
+   s->vs_groups[0] = (vertices + RADV_GS_COMPUTE_WAVE - 1) / RADV_GS_COMPUTE_WAVE;
+   s->vs_groups[1] = instance_count;
+   s->vs_groups[2] = 1;
+   s->tcs_groups[0] = in_patches;
+   s->tcs_groups[1] = instance_count;
+   s->tcs_groups[2] = 1;
+   s->tess_groups[0] = ((uint)patches + RADV_GS_COMPUTE_WAVE - 1) / RADV_GS_COMPUTE_WAVE;
+   s->tess_groups[1] = 1;
+   s->tess_groups[2] = 1;
+}
+
+/* One tessellator pass over the draw's patches, one invocation each, in the
+ * mode enum poly_tess_mode names. */
+void
+radv_gs_compute_tess_isolines(constant struct poly_tess_params *p, uint mode)
+{
+   uint patch = cl_global_id.x;
+   if (patch < p->nr_patches)
+      poly_tess_isoline_process(p, patch, mode);
+}
+
+void
+radv_gs_compute_tess_triangles(constant struct poly_tess_params *p, uint mode)
+{
+   uint patch = cl_global_id.x;
+   if (patch < p->nr_patches)
+      poly_tess_tri_process(p, patch, mode);
+}
+
+void
+radv_gs_compute_tess_quads(constant struct poly_tess_params *p, uint mode)
+{
+   uint patch = cl_global_id.x;
+   if (patch < p->nr_patches)
+      poly_tess_quad_process(p, patch, mode);
+}
+
+/* The inclusive prefix sum of the patches' index counts (one workgroup of one
+ * wave), then the index buffer they take and the draw of the tessellator's
+ * output: a VkDrawIndirectCommand of that many vertices, which the
+ * evaluation shader reads through the index buffer (poly_load_tes_index).
+ * When the index buffer does not fit, no patch is tessellated and nothing is
+ * drawn. */
+void
+radv_gs_compute_tess_prefix_sum(global struct poly_tess_params *p)
+{
+   const uint len = p->nr_patches;
+   global uint *counts = p->counts;
+
+   uint carry = 0;
+   for (uint base = 0; base < len; base += RADV_GS_COMPUTE_WAVE) {
+      const uint i = base + cl_local_id.x;
+      const uint x = i < len ? counts[i] : 0;
+      const uint sum = sub_group_scan_inclusive_add(x) + carry;
+      if (i < len)
+         counts[i] = sum;
+      carry = sub_group_broadcast(sum, RADV_GS_COMPUTE_WAVE - 1);
+   }
+
+   if (cl_local_id.x != 0)
+      return;
+
+   uint total = carry;
+   uint offs = 0;
+   if (len && heap_alloc(p->heap, (uint64_t)total * 4, &offs)) {
+      p->index_buffer = (global uint32_t *)(p->heap->base + offs);
+   } else {
+      total = 0;
+      p->nr_patches = 0;
+   }
+
+   global uint32_t *draw = p->out_draws;
+   draw[0] = total;
+   draw[1] = 1;
+   draw[2] = 0;
+   draw[3] = 0;
 }
