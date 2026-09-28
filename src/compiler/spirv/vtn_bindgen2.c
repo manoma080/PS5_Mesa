@@ -233,8 +233,13 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    bool scratch_lowered = false;
    NIR_PASS(scratch_lowered, nir, nir_lower_scratch_to_var);
    if (scratch_lowered) {
+      /* Only small arrays: one if-else tree per indirect access of a large
+       * one multiplies the function (poly's tessellator went from thousands
+       * of instructions to millions). The larger ones stay variables with
+       * indirect derefs, which the driver lowers as it does its own.
+       */
       NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
-               nir_var_function_temp, ~0);
+               nir_var_function_temp, 16);
    }
 
    /* Prune derefs/variables late, since scratch lowering leaves dead

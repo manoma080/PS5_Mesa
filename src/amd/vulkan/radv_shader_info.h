@@ -83,6 +83,8 @@ enum radv_gs_compute_kind {
    RADV_GS_COMPUTE_COUNT,  /* per-primitive output counts; the GS's memory writes */
    RADV_GS_COMPUTE_PRE_GS, /* transform feedback and query setup */
    RADV_GS_COMPUTE_MAIN,   /* transform feedback and the rasterized index buffer */
+   RADV_GS_COMPUTE_TCS,    /* the tessellation control shader, outputs to memory */
+   RADV_GS_COMPUTE_TES,    /* the tessellation evaluation shader over the tessellator's output, outputs to memory */
    RADV_GS_COMPUTE_RAST,   /* the hardware vertex shader drawing the GS output */
 };
 

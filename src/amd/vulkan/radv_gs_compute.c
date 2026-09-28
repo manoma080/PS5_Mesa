@@ -37,10 +37,18 @@ radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const str
    if (!compiler_info->key.no_legacy_gs || !gs || !stages[MESA_SHADER_VERTEX].nir)
       return false;
 
-   /* So far: a vertex shader feeding the geometry shader. Its vertex input may
-    * come at the draw (radv_gs_compute_deferred_vs). */
-   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir)
+   /* The vertex shader's input may come at the draw
+    * (radv_gs_compute_deferred_vs). With tessellation, both of its shaders. */
+   const bool tess = stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir;
+   if (tess && (!stages[MESA_SHADER_TESS_CTRL].nir || !stages[MESA_SHADER_TESS_EVAL].nir))
       return false;
+
+   /* A tessellated geometry shader amplifying past one NGG subgroup: NGG then
+    * splits a primitive's invocations across subgroups, which hangs with
+    * tessellation on GFX10-class hardware (where RADV takes the legacy GS
+    * this GPU does not have, radv_fill_shader_info_ngg). */
+   if (tess && gs->info.gs.invocations * gs->info.gs.vertices_out > 256)
+      return true;
 
    /* Transform feedback from a geometry shader, which NGG cannot capture here
     * (radv_gs_compute.h); every geometry shader when forced for testing. */
@@ -146,6 +154,41 @@ radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key
    return outputs;
 }
 
+/* After tessellation the primitive ID restarts with each instance
+ * (radv_gs_compute_tess_primitive_id); without tessellation parameters in
+ * the draw block, poly's own ID stands. */
+static void
+lower_tess_primitive_id(nir_shader *gs)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(gs);
+   struct util_dynarray loads;
+   util_dynarray_init(&loads, NULL);
+   nir_foreach_block (block, impl) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_primitive_id)
+            util_dynarray_append(&loads, nir_instr_as_intrinsic(instr));
+      }
+   }
+
+   nir_builder b = nir_builder_create(impl);
+   const unsigned vertices_per_prim = mesa_vertices_per_prim(gs->info.gs.input_primitive);
+   util_dynarray_foreach (&loads, nir_intrinsic_instr *, load) {
+      b.cursor = nir_before_instr(&(*load)->instr);
+      nir_def *raw = nir_load_primitive_id(&b);
+      nir_def *params = nir_load_tess_param_buffer_poly(&b);
+      nir_def *adjusted;
+      nir_push_if(&b, nir_ine_imm(&b, params, 0));
+      {
+         adjusted = radv_gs_compute_tess_primitive_id(&b, params, raw, nir_imm_int(&b, vertices_per_prim));
+      }
+      nir_pop_if(&b, NULL);
+      nir_def_replace(&(*load)->def, nir_if_phi(&b, adjusted, raw));
+   }
+   util_dynarray_fini(&loads);
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 /* The geometry shader's half: poly's count pass, pre-GS setup, the GS proper
  * (out->nir) and the rasterization copy (returned). The GS reads the vertex
  * outputs through the mask the draw passes (poly's vertex parameters), so this
@@ -159,6 +202,8 @@ radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key
    /* poly keeps the memory writes in a count pass only when the shader's
     * information says it writes memory: gather it again after lowering. */
    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
+
+   lower_tess_primitive_id(gs);
 
    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
    NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
@@ -196,21 +241,92 @@ radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key
    return rast;
 }
 
+/* Either tessellation shader may declare the mode, spacing, winding, point
+ * mode and output patch size; they agree where both do (as merge_tess_info
+ * merges them for the hardware path). */
+static void
+merge_tess_info(nir_shader *tcs, nir_shader *tes)
+{
+   tes->info.tess.tcs_vertices_out |= tcs->info.tess.tcs_vertices_out;
+   tes->info.tess.spacing |= tcs->info.tess.spacing;
+   tes->info.tess._primitive_mode |= tcs->info.tess._primitive_mode;
+   tes->info.tess.ccw |= tcs->info.tess.ccw;
+   tes->info.tess.point_mode |= tcs->info.tess.point_mode;
+   tcs->info.tess.tcs_vertices_out = tes->info.tess.tcs_vertices_out;
+   tcs->info.tess._primitive_mode = tes->info.tess._primitive_mode;
+}
+
+static void
+lower_io_for_poly(nir_shader *nir, const struct radv_shader_stage_key *key)
+{
+   radv_nir_lower_io(nir);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   radv_optimize_nir(nir, key->optimisations_disabled);
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+}
+
+/* The tessellation control shader reads the vertex shader's outputs from
+ * memory and writes its own there, one workgroup per patch (poly's layout). */
+void
+radv_gs_compute_lower_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key,
+                          struct radv_gs_compute_tess_info *tess)
+{
+   lower_io_for_poly(tcs, key);
+   tess->output_patch_size = tcs->info.tess.tcs_vertices_out;
+   tess->per_vertex_outputs = poly_tcs_per_vertex_outputs(tcs);
+   tess->patch_outputs = util_last_bit(tcs->info.patch_outputs_written);
+   tess->tcs_stride_B = poly_tcs_output_stride(tcs);
+   NIR_PASS(_, tcs, poly_nir_lower_tcs, false);
+}
+
+/* The tessellation evaluation shader runs over the tessellator's output as
+ * the geometry shader's vertex stage: its domain point, patch and inputs come
+ * from memory, and its outputs go there as a vertex shader's do. */
+void
+radv_gs_compute_lower_tes(nir_shader *tes, const struct radv_shader_stage_key *key,
+                          struct radv_gs_compute_tess_info *tess)
+{
+   lower_io_for_poly(tes, key);
+   tess->prim = tes->info.tess._primitive_mode;
+   tess->spacing = tes->info.tess.spacing;
+   tess->ccw = tes->info.tess.ccw;
+   tess->points = tes->info.tess.point_mode;
+   NIR_PASS(_, tes, poly_nir_lower_tes, false);
+
+   uint64_t outputs = tes->info.outputs_written;
+   NIR_PASS(_, tes, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow, &outputs);
+   tess->tes_outputs = outputs;
+}
+
 void
 radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
                       struct radv_gs_compute_nir *out)
 {
    (void)compiler_info;
    struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
+   struct radv_shader_stage *tcs_stage = &stages[MESA_SHADER_TESS_CTRL];
+   struct radv_shader_stage *tes_stage = &stages[MESA_SHADER_TESS_EVAL];
    struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
 
    memset(out, 0, sizeof(*out));
    out->vs_outputs = radv_gs_compute_lower_vs(vs_stage->nir, &vs_stage->key);
    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs_stage->nir;
+   if (tcs_stage->nir) {
+      merge_tess_info(tcs_stage->nir, tes_stage->nir);
+      radv_gs_compute_lower_tcs(tcs_stage->nir, &tcs_stage->key, &out->tess);
+      radv_gs_compute_lower_tes(tes_stage->nir, &tes_stage->key, &out->tess);
+      out->tess.used = true;
+      out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_TCS)] = tcs_stage->nir;
+      out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_TES)] = tes_stage->nir;
+      tcs_stage->nir = NULL;
+      tcs_stage->stage = MESA_SHADER_NONE;
+      tes_stage->nir = NULL;
+      tes_stage->stage = MESA_SHADER_NONE;
+   }
    nir_shader *const rast = radv_gs_compute_split_gs(gs_stage->nir, &gs_stage->key, out);
 
    /* The pipeline's hardware vertex shader is the rasterization copy; there is
-    * no hardware geometry shader. */
+    * no hardware geometry shader, and no hardware tessellation. */
    vs_stage->nir = rast;
    vs_stage->next_stage = MESA_SHADER_FRAGMENT;
    gs_stage->nir = NULL;
@@ -299,6 +415,9 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_load_geometry_param_buffer_poly:
       value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(geometry_params));
       break;
+   case nir_intrinsic_load_tess_param_buffer_poly:
+      value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(tess_params));
+      break;
    case nir_intrinsic_load_ro_sink_address_poly:
    case nir_intrinsic_load_stat_query_address_poly:
       /* Statistics come with queries (not yet): into the sink meanwhile. */
@@ -335,6 +454,12 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          return false;
       value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(draw_id), 1);
       break;
+   case nir_intrinsic_load_view_index:
+      /* The rasterization copy has the hardware's; the passes, the draw's. */
+      if (!compute)
+         return false;
+      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(view_index), 1);
+      break;
    default:
       return false;
    }
@@ -355,9 +480,10 @@ radv_gs_compute_lower_sysvals(nir_shader *nir, const struct radv_compiler_info *
 }
 
 /* Only invocations inside poly's grid run: (vertices, instances) for the
- * vertex shader, (primitives, instances) for the geometry shader's passes,
- * from the parameter blocks. A dispatch covers whole workgroups; the rest of
- * the last one must write nothing. */
+ * vertex shader or the tessellation evaluation shader in its place,
+ * (primitives, instances) for the geometry shader's passes, from the
+ * parameter blocks. A dispatch covers whole workgroups; the rest of the last
+ * one must write nothing. */
 static void
 guard_grid(nir_shader *nir, enum radv_gs_compute_kind kind)
 {
@@ -368,7 +494,7 @@ guard_grid(nir_shader *nir, enum radv_gs_compute_kind kind)
    nir_builder b = nir_builder_at(nir_before_impl(impl));
    nir_def *params;
    unsigned grid_offset;
-   if (kind == RADV_GS_COMPUTE_VS) {
+   if (kind == RADV_GS_COMPUTE_VS || kind == RADV_GS_COMPUTE_TES) {
       params = nir_load_vertex_param_buffer_poly(&b);
       grid_offset = offsetof(struct poly_vertex_params, grid);
    } else {
@@ -416,14 +542,18 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
                                 false, &vs_info);
    }
 
-   /* The pre-GS setup is one invocation; the others cover poly's grid. */
-   if (kind != RADV_GS_COMPUTE_PRE_GS)
+   /* The pre-GS setup is one invocation, and the tessellation control shader
+    * one workgroup per patch, as many as there are; the others cover poly's
+    * grid. */
+   if (kind != RADV_GS_COMPUTE_PRE_GS && kind != RADV_GS_COMPUTE_TCS)
       guard_grid(nir, kind);
 
-   /* Everything runs as compute, 64 invocations a workgroup along x. */
+   /* Everything runs as compute, 64 invocations a workgroup along x but the
+    * tessellation control shader, a patch's output vertices. */
+   const unsigned workgroup_size = kind == RADV_GS_COMPUTE_TCS ? nir->info.tess.tcs_vertices_out : 64;
    nir->info.stage = MESA_SHADER_COMPUTE;
    memset(&nir->info.cs, 0, sizeof(nir->info.cs));
-   nir->info.workgroup_size[0] = 64;
+   nir->info.workgroup_size[0] = workgroup_size;
    nir->info.workgroup_size[1] = 1;
    nir->info.workgroup_size[2] = 1;
    nir->info.workgroup_size_variable = false;
@@ -561,11 +691,21 @@ radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compu
       [RADV_GS_COMPUTE_META_SETUP] = RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP,
       [RADV_GS_COMPUTE_META_UNROLL] = RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL,
       [RADV_GS_COMPUTE_META_PREFIX_SUM] = RADV_META_OBJECT_KEY_GS_COMPUTE_PREFIX_SUM,
+      [RADV_GS_COMPUTE_META_TESS_SETUP] = RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_SETUP,
+      [RADV_GS_COMPUTE_META_TESS_ISOLINES] = RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_ISOLINES,
+      [RADV_GS_COMPUTE_META_TESS_TRIANGLES] = RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_TRIANGLES,
+      [RADV_GS_COMPUTE_META_TESS_QUADS] = RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_QUADS,
+      [RADV_GS_COMPUTE_META_TESS_PREFIX_SUM] = RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_PREFIX_SUM,
    };
    static const char *const names[] = {
       [RADV_GS_COMPUTE_META_SETUP] = "meta_gs_compute_setup",
       [RADV_GS_COMPUTE_META_UNROLL] = "meta_gs_compute_unroll",
       [RADV_GS_COMPUTE_META_PREFIX_SUM] = "meta_gs_compute_prefix_sum",
+      [RADV_GS_COMPUTE_META_TESS_SETUP] = "meta_gs_compute_tess_setup",
+      [RADV_GS_COMPUTE_META_TESS_ISOLINES] = "meta_gs_compute_tess_isolines",
+      [RADV_GS_COMPUTE_META_TESS_TRIANGLES] = "meta_gs_compute_tess_triangles",
+      [RADV_GS_COMPUTE_META_TESS_QUADS] = "meta_gs_compute_tess_quads",
+      [RADV_GS_COMPUTE_META_TESS_PREFIX_SUM] = "meta_gs_compute_tess_prefix_sum",
    };
    const enum radv_meta_object_key_type key = keys[meta];
    const VkPushConstantRange pc_range = {
@@ -584,12 +724,14 @@ radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compu
       return VK_SUCCESS;
    }
 
-   /* One invocation sets a draw up; the unroll and each word's prefix sum are
-    * one wave (their ballots and scans see the whole workgroup). The push
-    * constant is the address of the argument block, or of the geometry
-    * parameters for the prefix sum. */
+   /* One invocation sets a draw up; the unroll and each prefix sum are one
+    * wave (their ballots and scans see the whole workgroup); the tessellator
+    * runs one invocation per patch. The push constant is the address of the
+    * argument block, of the geometry parameters for the geometry shader's
+    * prefix sum, or of the tessellation parameters for the tessellator's. */
    nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "%s", names[meta]);
-   b.shader->info.workgroup_size[0] = meta == RADV_GS_COMPUTE_META_SETUP ? 1 : RADV_GS_COMPUTE_WAVE;
+   b.shader->info.workgroup_size[0] =
+      meta == RADV_GS_COMPUTE_META_SETUP || meta == RADV_GS_COMPUTE_META_TESS_SETUP ? 1 : RADV_GS_COMPUTE_WAVE;
    nir_def *args = nir_pack_64_2x32(&b, nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8));
    switch (meta) {
    case RADV_GS_COMPUTE_META_SETUP:
@@ -600,6 +742,26 @@ radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compu
       break;
    case RADV_GS_COMPUTE_META_PREFIX_SUM:
       radv_gs_compute_prefix_sum(&b, args);
+      break;
+   case RADV_GS_COMPUTE_META_TESS_SETUP:
+      radv_gs_compute_tess_setup(&b, args);
+      break;
+   case RADV_GS_COMPUTE_META_TESS_ISOLINES:
+   case RADV_GS_COMPUTE_META_TESS_TRIANGLES:
+   case RADV_GS_COMPUTE_META_TESS_QUADS: {
+      /* struct radv_gs_compute_tessellate */
+      nir_def *params = nir_load_global(&b, 1, 64, args, .align_mul = 8);
+      nir_def *mode = nir_load_global(&b, 1, 32, nir_iadd_imm(&b, args, 8), .align_mul = 4);
+      if (meta == RADV_GS_COMPUTE_META_TESS_ISOLINES)
+         radv_gs_compute_tess_isolines(&b, params, mode);
+      else if (meta == RADV_GS_COMPUTE_META_TESS_TRIANGLES)
+         radv_gs_compute_tess_triangles(&b, params, mode);
+      else
+         radv_gs_compute_tess_quads(&b, params, mode);
+      break;
+   }
+   case RADV_GS_COMPUTE_META_TESS_PREFIX_SUM:
+      radv_gs_compute_tess_prefix_sum(&b, args);
       break;
    }
 

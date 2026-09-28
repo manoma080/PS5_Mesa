@@ -365,6 +365,9 @@ struct radv_cmd_state {
    /* Whether the draw is a geometry shader's rasterization copy (its compute
     * passes counted for the queries). */
    bool gs_compute_rasterizing;
+   /* With multiview, the view whose draw runs a geometry shader as compute
+    * (radv_gs_compute_draw), each one separately. */
+   uint32_t gs_compute_view;
    /* The geometry-shader-as-compute set the bound shader objects make
     * (radv_gs_compute_objects): the geometry object's passes, the vertex
     * object's vertex pass. */

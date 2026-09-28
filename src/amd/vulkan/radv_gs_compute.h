@@ -41,6 +41,14 @@
  *
  * Every one of those shaders reads one per-draw block, struct
  * radv_gs_compute_draw, through a user SGPR.
+ *
+ * With tessellation (a GS NGG cannot run past one subgroup's vertices, or
+ * with transform feedback), the vertex shader and the tessellation control
+ * shader run as compute too, then poly's tessellator (the D3D11 reference
+ * tessellator, which Asahi runs the same way) counts each patch's indices,
+ * their prefix sum places them and it writes them with the domain points; the
+ * tessellation evaluation shader is then the vertex stage of the passes
+ * above, over a draw of the tessellator's output.
  */
 
 struct radv_compiler_info;
@@ -53,7 +61,7 @@ struct radv_shader_debug_info;
 #define RADV_GS_COMPUTE_DRAW_OFFSET(field) ((unsigned)offsetof(struct radv_gs_compute_draw, field))
 
 /* enum radv_gs_compute_kind is radv_shader_info.h's. */
-#define RADV_GS_COMPUTE_SHADERS 4 /* VS, COUNT, PRE_GS, MAIN */
+#define RADV_GS_COMPUTE_SHADERS 6 /* VS, COUNT, PRE_GS, MAIN, TCS, TES */
 
 static inline unsigned
 radv_gs_compute_index(enum radv_gs_compute_kind kind)
@@ -61,11 +69,28 @@ radv_gs_compute_index(enum radv_gs_compute_kind kind)
    return kind - RADV_GS_COMPUTE_VS;
 }
 
+/* The tessellation state the passes need, merged from both tessellation
+ * shaders as the hardware path merges it. */
+struct radv_gs_compute_tess_info {
+   bool used;
+   bool ccw;
+   bool points;
+   uint8_t prim;    /* enum tess_primitive_mode */
+   uint8_t spacing; /* enum gl_tess_spacing */
+   uint8_t output_patch_size;
+   uint8_t patch_outputs; /* per-patch outputs, as poly counts them */
+   uint32_t tcs_stride_B; /* one patch's outputs in memory */
+   uint64_t per_vertex_outputs;
+   /* The evaluation shader's outputs: what the geometry shader reads. */
+   uint64_t tes_outputs;
+};
+
 struct radv_gs_compute_nir {
    nir_shader *nir[RADV_GS_COMPUTE_SHADERS];
    struct poly_gs_info info;
    /* The vertex shader's outputs: the layout of what it stores. */
    uint64_t vs_outputs;
+   struct radv_gs_compute_tess_info tess;
 };
 
 /* What a pipeline compile hands back (radv_graphics_shaders_compile). With
@@ -79,6 +104,7 @@ struct radv_gs_compute_binaries {
    struct radv_shader_debug_info debug[RADV_GS_COMPUTE_SHADERS];
    struct poly_gs_info info;
    uint64_t vs_outputs;
+   struct radv_gs_compute_tess_info tess;
    void *vs_nir;
    size_t vs_nir_size;
    struct radv_shader_stage_key vs_key;
@@ -110,6 +136,7 @@ struct radv_gs_compute_pipeline {
    struct radv_gs_compute_deferred_vs *deferred_vs;
    struct poly_gs_info info;
    uint64_t vs_outputs;
+   struct radv_gs_compute_tess_info tess;
 };
 
 /* The draw's topology as poly names it, from RADV's dynamic state (which
@@ -147,12 +174,19 @@ radv_gs_compute_input_prim(unsigned di_pt)
 static inline unsigned
 radv_gs_compute_rast_topology(enum mesa_prim mode)
 {
+   /* poly draws the geometry shader's strips, or the lists it matched them
+    * to (optimize_static_topology). */
    switch (mode) {
    case MESA_PRIM_POINTS:
       return V_008958_DI_PT_POINTLIST;
+   case MESA_PRIM_LINES:
+      return V_008958_DI_PT_LINELIST;
    case MESA_PRIM_LINE_STRIP:
       return V_008958_DI_PT_LINESTRIP;
+   case MESA_PRIM_TRIANGLES:
+      return V_008958_DI_PT_TRILIST;
    default:
+      assert(mode == MESA_PRIM_TRIANGLE_STRIP);
       return V_008958_DI_PT_TRISTRIP;
    }
 }
@@ -168,6 +202,15 @@ void radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struc
 uint64_t radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key);
 nir_shader *radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key,
                                      struct radv_gs_compute_nir *out);
+
+/* A tessellation control or evaluation shader's pass, for shaders compiled
+ * apart (shader objects): the NIR lowered, and the part of the tessellation
+ * state that stage fixes (the control shader's output patch and outputs; the
+ * evaluation shader's domain, spacing, winding, point mode and outputs). */
+void radv_gs_compute_lower_tcs(nir_shader *tcs, const struct radv_shader_stage_key *key,
+                               struct radv_gs_compute_tess_info *tess);
+void radv_gs_compute_lower_tes(nir_shader *tes, const struct radv_shader_stage_key *key,
+                               struct radv_gs_compute_tess_info *tess);
 
 /* Replaces the system values a geometry shader run as compute reads (poly's,
  * the draw's) with loads from the draw block; the stage's arguments must be
@@ -201,6 +244,11 @@ enum radv_gs_compute_meta {
    RADV_GS_COMPUTE_META_SETUP,
    RADV_GS_COMPUTE_META_UNROLL,
    RADV_GS_COMPUTE_META_PREFIX_SUM,
+   RADV_GS_COMPUTE_META_TESS_SETUP,
+   RADV_GS_COMPUTE_META_TESS_ISOLINES,
+   RADV_GS_COMPUTE_META_TESS_TRIANGLES,
+   RADV_GS_COMPUTE_META_TESS_QUADS,
+   RADV_GS_COMPUTE_META_TESS_PREFIX_SUM,
 };
 
 VkResult radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,

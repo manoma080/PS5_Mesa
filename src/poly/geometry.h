@@ -121,6 +121,25 @@ poly_heap_alloc_offs(global struct poly_heap *heap, uint size_B)
 {
    size_B = align(size_B, 16);
 
+#ifdef POLY_HEAP_GUARD
+   /* For drivers without abort: an allocation that does not fit gets the
+    * guard past the heap's end, which holds the largest single allocation made
+    * from here, and leaves heap->bottom past heap->size for the driver to
+    * notice and draw nothing. Nothing is added once the heap is full, so
+    * bottom cannot wrap.
+    */
+   uint bottom = heap->bottom;
+   if (bottom <= heap->size && size_B <= heap->size - bottom) {
+      uint offs =
+         atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size_B);
+      if (offs <= heap->size && size_B <= heap->size - offs)
+         return offs;
+   } else {
+      atomic_fetch_max((volatile atomic_uint *)(&heap->bottom),
+                       heap->size + 16);
+   }
+   return heap->size;
+#else
    uint offs =
       atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size_B);
 
@@ -134,6 +153,7 @@ poly_heap_alloc_offs(global struct poly_heap *heap, uint size_B)
    }
 
    return offs;
+#endif
 }
 
 static inline global void *

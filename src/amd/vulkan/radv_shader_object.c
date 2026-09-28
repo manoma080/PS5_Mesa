@@ -56,6 +56,9 @@ radv_shader_object_destroy(struct radv_device *device, struct radv_shader_object
    if (shader_obj->gs_compute.rast)
       radv_shader_unref(device, shader_obj->gs_compute.rast);
    free(shader_obj->gs_compute.rast_binary);
+   if (shader_obj->gs_compute.tess_pass)
+      radv_shader_unref(device, shader_obj->gs_compute.tess_pass);
+   free(shader_obj->gs_compute.tess_binary);
 
    vk_object_base_finish(&shader_obj->base);
    vk_free2(&device->vk.alloc, pAllocator, shader_obj);
@@ -293,19 +296,47 @@ radv_shader_object_split_gs(struct radv_shader_object *shader_obj, struct radv_d
    return shader_obj->gs_compute.rast ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
-/* What a vertex or geometry object needs for geometry shaders run as compute,
- * from its SPIR-V. */
+/* A tessellation control or evaluation object's pass, from its NIR
+ * (consumed). */
+static VkResult
+radv_shader_object_split_tess(struct radv_shader_object *shader_obj, struct radv_device *device,
+                              const struct radv_shader_stage *stage, nir_shader *nir)
+{
+   const struct radv_compiler_info *compiler_info = &device->compiler_info;
+   const enum radv_gs_compute_kind kind =
+      stage->stage == MESA_SHADER_TESS_CTRL ? RADV_GS_COMPUTE_TCS : RADV_GS_COMPUTE_TES;
+   if (kind == RADV_GS_COMPUTE_TCS)
+      radv_gs_compute_lower_tcs(nir, &stage->key, &shader_obj->gs_compute.tess);
+   else
+      radv_gs_compute_lower_tes(nir, &stage->key, &shader_obj->gs_compute.tess);
+
+   struct radv_graphics_state_key gfx_state;
+   radv_shader_object_gfx_state(&gfx_state);
+   struct radv_shader_debug_info debug = {0};
+   shader_obj->gs_compute.tess_binary = radv_gs_compute_compile(compiler_info, &gfx_state, stage, kind, nir, &debug);
+   ralloc_free(nir);
+   if (shader_obj->gs_compute.tess_binary)
+      shader_obj->gs_compute.tess_pass =
+         radv_shader_create(device, NULL, shader_obj->gs_compute.tess_binary, true, &debug);
+   return shader_obj->gs_compute.tess_pass ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
+/* What a vertex, tessellation or geometry object needs for geometry shaders
+ * run as compute, from its SPIR-V. */
 static VkResult
 radv_shader_object_init_gs_compute(struct radv_shader_object *shader_obj, struct radv_device *device,
                                    const VkShaderCreateInfoEXT *pCreateInfo)
 {
    const struct radv_compiler_info *compiler_info = &device->compiler_info;
    const mesa_shader_stage stage = shader_obj->stage;
+   const VkShaderStageFlags next = pCreateInfo->nextStage;
 
    if (!compiler_info->key.no_legacy_gs)
       return VK_SUCCESS;
-   if (!(stage == MESA_SHADER_VERTEX && (pCreateInfo->nextStage & VK_SHADER_STAGE_GEOMETRY_BIT)) &&
-       stage != MESA_SHADER_GEOMETRY)
+   if (!(stage == MESA_SHADER_VERTEX &&
+         (next & (VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT))) &&
+       !(stage == MESA_SHADER_TESS_CTRL && (next & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)) &&
+       !(stage == MESA_SHADER_TESS_EVAL && (next & VK_SHADER_STAGE_GEOMETRY_BIT)) && stage != MESA_SHADER_GEOMETRY)
       return VK_SUCCESS;
 
    struct radv_shader_stage s;
@@ -316,13 +347,19 @@ radv_shader_object_init_gs_compute(struct radv_shader_object *shader_obj, struct
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    if (stage == MESA_SHADER_GEOMETRY) {
-      /* As radv_gs_compute_wanted decides for pipelines. */
-      if (!nir->xfb_info && !debug_get_bool_option("RADV_PS5_GS_COMPUTE", false)) {
+      /* As radv_gs_compute_wanted decides for pipelines: with transform
+       * feedback always, amplifying past one NGG subgroup with tessellation
+       * (radv_gs_compute_objects). */
+      shader_obj->gs_compute.amplifies = nir->info.gs.invocations * nir->info.gs.vertices_out > 256;
+      if (!nir->xfb_info && !shader_obj->gs_compute.amplifies &&
+          !debug_get_bool_option("RADV_PS5_GS_COMPUTE", false)) {
          ralloc_free(nir);
          return VK_SUCCESS;
       }
       return radv_shader_object_split_gs(shader_obj, device, &s, nir);
    }
+   if (stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL)
+      return radv_shader_object_split_tess(shader_obj, device, &s, nir);
 
    shader_obj->gs_compute.vs_outputs = radv_gs_compute_lower_vs(nir, &s.key);
    struct blob blob;
@@ -526,6 +563,7 @@ radv_shader_object_read_gs_compute(struct radv_shader_object *shader_obj, struct
       if (!gsc)
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       shader_obj->gs_compute.gs = gsc;
+      shader_obj->gs_compute.amplifies = blob_read_uint32(blob);
       blob_copy_bytes(blob, &gsc->info, sizeof(gsc->info));
       for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
          const VkResult result =
@@ -535,6 +573,12 @@ radv_shader_object_read_gs_compute(struct radv_shader_object *shader_obj, struct
       }
       return radv_shader_object_read_gs_binary(device, blob, &shader_obj->gs_compute.rast,
                                                &shader_obj->gs_compute.rast_binary);
+   }
+
+   if (kind == 3) {
+      blob_copy_bytes(blob, &shader_obj->gs_compute.tess, sizeof(shader_obj->gs_compute.tess));
+      return radv_shader_object_read_gs_binary(device, blob, &shader_obj->gs_compute.tess_pass,
+                                               &shader_obj->gs_compute.tess_binary);
    }
 
    return kind ? VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT : VK_SUCCESS;
@@ -936,8 +980,10 @@ radv_get_gs_compute_size(const struct radv_shader_object *shader_obj)
    if (shader_obj->gs_compute.vs) {
       size += 2 * sizeof(uint32_t) + sizeof(struct radv_shader_stage_key) + sizeof(uint32_t) +
               align(shader_obj->gs_compute.vs->nir_size, 4);
+   } else if (shader_obj->gs_compute.tess_pass) {
+      size += sizeof(struct radv_gs_compute_tess_info) + radv_get_shader_binary_size(shader_obj->gs_compute.tess_binary);
    } else if (shader_obj->gs_compute.gs) {
-      size += sizeof(struct poly_gs_info);
+      size += sizeof(uint32_t) + sizeof(struct poly_gs_info);
       for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++)
          size += radv_get_shader_binary_size(shader_obj->gs_compute.binaries[i]);
       size += radv_get_shader_binary_size(shader_obj->gs_compute.rast_binary);
@@ -1036,8 +1082,13 @@ radv_GetShaderBinaryDataEXT(VkDevice _device, VkShaderEXT shader, size_t *pDataS
       blob_write_uint32(&blob, vs->nir_size);
       blob_write_bytes(&blob, vs->nir, vs->nir_size);
       blob_write_bytes(&blob, "\0\0\0", align(vs->nir_size, 4) - vs->nir_size);
+   } else if (shader_obj->gs_compute.tess_pass) {
+      blob_write_uint32(&blob, 3);
+      blob_write_bytes(&blob, &shader_obj->gs_compute.tess, sizeof(shader_obj->gs_compute.tess));
+      radv_write_shader_binary(&blob, shader_obj->gs_compute.tess_binary);
    } else if (shader_obj->gs_compute.gs) {
       blob_write_uint32(&blob, 2);
+      blob_write_uint32(&blob, shader_obj->gs_compute.amplifies);
       blob_write_bytes(&blob, &shader_obj->gs_compute.gs->info, sizeof(shader_obj->gs_compute.gs->info));
       for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++)
          radv_write_shader_binary(&blob, shader_obj->gs_compute.binaries[i]);

@@ -59,6 +59,14 @@ struct radv_shader_object {
       struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
       struct radv_shader *rast;
       struct radv_shader_binary *rast_binary;
+      /* A geometry object amplifying past one NGG subgroup, which runs as
+       * compute when tessellation feeds it. */
+      bool amplifies;
+      /* A tessellation control or evaluation object's pass, and the part of
+       * the tessellation state its stage fixes. */
+      struct radv_shader *tess_pass;
+      struct radv_shader_binary *tess_binary;
+      struct radv_gs_compute_tess_info tess;
    } gs_compute;
 };
 
