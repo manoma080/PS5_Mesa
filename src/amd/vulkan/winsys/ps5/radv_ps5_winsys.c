@@ -343,6 +343,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * to report itself non-resident; and a bind is a mapping change made at
     * once, after the submission's waits. */
    info->has_sparse = true;
+   /* A compute and transfer queue family, as upstream offers on this family
+    * of GPUs, whose queues submit to the graphics ring through the same
+    * sceAgcDriverSubmitDcb: their work runs in turn with graphics rather than
+    * alongside it, which Vulkan allows. AGC's asynchronous compute queues
+    * would run it alongside; they are not used yet. */
+   info->num_compute_queues_on_gfx = 4;
    info->has_sparse_prt = false;
    info->has_sparse_cpu_binds = true;
    info->max_sparse_va_bytes = radv_ps5_vrange_space_bytes();

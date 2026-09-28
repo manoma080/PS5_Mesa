@@ -421,6 +421,10 @@ struct radeon_info {
    bool has_sparse_cpu_binds;
    /* How much address space sparse resources can take in all. */
    uint64_t max_sparse_va_bytes;
+   /* Queues of a compute and transfer family whose submissions go to the
+    * graphics ring, without concurrency, where there is no compute ring to
+    * use (the PS5 winsys). 0 without such a family. */
+   uint8_t num_compute_queues_on_gfx;
    /* 3D sparse images */
    bool has_sparse_image_3d;
    /* 3D sparse images with standard block shape */
