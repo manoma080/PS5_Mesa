@@ -1,6 +1,6 @@
 # RADV on the PlayStation 5
 
-This is my fork of Mesa 26.2.0 (branch `main`, also kept as `ps5-port`). It
+This is my fork of Mesa 26.2.0; all of its work is on branch `main`. It
 runs RADV, Mesa's Vulkan driver for AMD GPUs, with its ACO shader compiler, on
 the PlayStation 5's GPU from a homebrew title. The fork adds a *winsys* for the
 console, the layer RADV keeps the kernel behind, and changes RADV only where
