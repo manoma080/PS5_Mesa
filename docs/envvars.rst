@@ -280,6 +280,15 @@ Core Mesa environment variables
 
    specifies number of mesa-db cache parts, default is 50.
 
+.. envvar:: MESA_DISK_CACHE_DATABASE_EXCLUSIVE
+
+   if set to ``true``, this process alone uses the mesa-db cache: each part
+   is opened and locked once for the process's life (a part another process
+   holds is not used), accesses skip reopening and relocking the files, and
+   access times are written in batches. Faster where file operations are
+   slow and several threads read the cache at once. Default is ``false``,
+   except on the PS5, where a title's cache is its own.
+
 .. envvar:: MESA_DISK_CACHE_DATABASE_EVICTION_SCORE_2X_PERIOD
 
    Mesa-DB cache eviction algorithm calculates weighted score for the

@@ -4,12 +4,90 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include "detect_os.h"
 #include "string.h"
 #include "mesa_cache_db_multipart.h"
 #include "u_debug.h"
+
+/* A PS5 title's cache is in its own folder, used by it alone. */
+#if defined(__PROSPERO__)
+#define EXCLUSIVE_DEFAULT true
+#else
+#define EXCLUSIVE_DEFAULT false
+#endif
+
+#if !DETECT_OS_WINDOWS
+/* The parts opened exclusively, by path: a second cache of this process on
+ * the same path shares them, as their locks would otherwise shut it out. */
+struct owned_part {
+   char *path;
+   struct mesa_cache_db *db;
+   unsigned refs;
+   struct owned_part *next;
+};
+
+static simple_mtx_t owned_parts_lock = SIMPLE_MTX_INITIALIZER;
+static struct owned_part *owned_parts;
+
+static struct mesa_cache_db *
+owned_part_open(const char *path)
+{
+   struct mesa_cache_db *db = NULL;
+
+   simple_mtx_lock(&owned_parts_lock);
+   for (struct owned_part *p = owned_parts; p; p = p->next) {
+      if (!strcmp(p->path, path)) {
+         p->refs++;
+         db = p->db;
+         goto done;
+      }
+   }
+
+   struct owned_part *p = calloc(1, sizeof(*p));
+   db = calloc(1, sizeof(*db));
+   if (p && db)
+      p->path = strdup(path);
+   if (!p || !db || !p->path || !mesa_cache_db_open_exclusive(db, path)) {
+      if (p)
+         free(p->path);
+      free(p);
+      free(db);
+      db = NULL;
+      goto done;
+   }
+   p->db = db;
+   p->refs = 1;
+   p->next = owned_parts;
+   owned_parts = p;
+
+done:
+   simple_mtx_unlock(&owned_parts_lock);
+   return db;
+}
+
+static void
+owned_part_close(struct mesa_cache_db *db)
+{
+   simple_mtx_lock(&owned_parts_lock);
+   for (struct owned_part **link = &owned_parts; *link; link = &(*link)->next) {
+      struct owned_part *p = *link;
+      if (p->db != db)
+         continue;
+      if (--p->refs == 0) {
+         *link = p->next;
+         mesa_cache_db_close(p->db);
+         free(p->db);
+         free(p->path);
+         free(p);
+      }
+      break;
+   }
+   simple_mtx_unlock(&owned_parts_lock);
+}
+#endif
 
 bool
 mesa_cache_db_multipart_open(struct mesa_cache_db_multipart *db,
@@ -19,6 +97,7 @@ mesa_cache_db_multipart_open(struct mesa_cache_db_multipart *db,
    return false;
 #else
    db->num_parts = debug_get_num_option("MESA_DISK_CACHE_DATABASE_NUM_PARTS", 50);
+   db->exclusive = debug_get_bool_option("MESA_DISK_CACHE_DATABASE_EXCLUSIVE", EXCLUSIVE_DEFAULT);
    db->cache_path = cache_path;
    db->parts = calloc(db->num_parts, sizeof(*db->parts));
    if (!db->parts)
@@ -62,17 +141,24 @@ mesa_cache_db_multipart_init_part_locked(struct mesa_cache_db_multipart *db,
       goto free_path;
 #endif
 
-   db_part = calloc(1, sizeof(*db_part));
-   if (!db_part)
-      goto free_path;
+   if (db->exclusive) {
+      db_part = owned_part_open(part_path);
+      db_opened = db_part != NULL;
+      if (!db_opened)
+         goto free_path;
+   } else {
+      db_part = calloc(1, sizeof(*db_part));
+      if (!db_part)
+         goto free_path;
 
-   /* DB opening may fail only in a case of a severe problem,
-    * like IO error.
-    */
-   db_opened = mesa_cache_db_open(db_part, part_path);
-   if (!db_opened) {
-      free(db_part);
-      goto free_path;
+      /* DB opening may fail only in a case of a severe problem,
+       * like IO error.
+       */
+      db_opened = mesa_cache_db_open(db_part, part_path);
+      if (!db_opened) {
+         free(db_part);
+         goto free_path;
+      }
    }
 
    if (db->max_cache_size)
@@ -135,10 +221,16 @@ void
 mesa_cache_db_multipart_close(struct mesa_cache_db_multipart *db)
 {
    while (db->num_parts--) {
-      if (db->parts[db->num_parts]) {
-         mesa_cache_db_close(db->parts[db->num_parts]);
-         free(db->parts[db->num_parts]);
+      if (!db->parts[db->num_parts])
+         continue;
+#if !DETECT_OS_WINDOWS
+      if (db->exclusive) {
+         owned_part_close(db->parts[db->num_parts]);
+         continue;
       }
+#endif
+      mesa_cache_db_close(db->parts[db->num_parts]);
+      free(db->parts[db->num_parts]);
    }
 
    free(db->parts);

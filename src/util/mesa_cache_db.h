@@ -37,11 +37,23 @@ struct mesa_cache_db {
    void *mem_ctx;
    uint64_t uuid;
    bool alive;
+   /* Opened by mesa_cache_db_open_exclusive: this process alone uses the
+    * files, which stay open and locked, and memory holds the database. */
+   bool owned;
+   /* An owned database's locks, on descriptors of their own, so that the
+    * streams can be reopened without letting go. */
+   int lock_fds[2];
+   /* Access times read hits changed in memory but not yet in the index file. */
+   unsigned dirty_times;
 };
 
 #if DETECT_OS_WINDOWS == 0
 bool
 mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path);
+
+/* For a process that alone uses the database: fails when another holds it. */
+bool
+mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path);
 
 void
 mesa_cache_db_close(struct mesa_cache_db *db);
@@ -78,6 +90,12 @@ mesa_cache_db_eviction_score(struct mesa_cache_db *db);
 #else
 static inline bool
 mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
+{
+   return false;
+}
+
+static inline bool
+mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path)
 {
    return false;
 }
