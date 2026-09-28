@@ -1034,6 +1034,8 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
       options.has_gen_prim_query = info->ms.has_query;
       options.has_ms_gs_invocations_query = info->ms.has_query;
       options.multiview = gfx_state->has_multiview_view_index;
+      options.ms_prim_parts = info->ms.prim_parts;
+      options.ms_publish = radv_ms_publishes(info);
 
       bool scratch_ring = false;
       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &options, &scratch_ring);

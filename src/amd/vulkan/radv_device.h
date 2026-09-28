@@ -174,6 +174,10 @@ struct radv_device {
    struct radeon_winsys_bo *gfx_init;
    struct radeon_winsys_bo *zero_bo;
 
+   /* The ring mesh shaders publish their outputs in when a workgroup's
+    * primitives go out in parts (radv_ms_publishes, AC_MS_PUBLISH_RING_BYTES). */
+   struct radeon_winsys_bo *ms_publish_ring;
+
    struct radeon_winsys_bo *trace_bo;
    struct radv_trace_data *trace_data;
 

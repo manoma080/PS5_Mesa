@@ -331,6 +331,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * ps5platform/videoout.h). */
    info->has_fixed_display_swizzle = true;
    info->display_swizzle_mode = ADDR_SW_64KB_R_X;
+   /* Every indirect mesh draw stopped the CP with a bad opcode at
+    * DISPATCH_MESH_INDIRECT_MULTI (dEQP-VK.mesh_shader.ext.api.draw_indirect*,
+    * run mesh-exp-1 in PS5_Vulkan); direct mesh draws, DRAW_INDEX_AUTO in
+    * fast launch, run. Indirect ones go through ordinary indirect draws
+    * (radv_mesh_draw_records_enabled). */
+   info->has_dispatch_mesh_indirect = false;
    /* No exported function holds the GPU at a stable power state
     * (radv_ps5_ctx_set_pstate refuses every state but none), so the profiling
     * lock VK_KHR_performance_query takes always failed

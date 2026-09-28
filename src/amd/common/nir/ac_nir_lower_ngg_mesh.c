@@ -122,7 +122,35 @@ typedef struct
 
    const uint8_t *vs_output_param_offset;
    bool has_param_exports;
+
+   /* ac_nir_lower_ngg_options.ms_prim_parts, the primitives of a part, and
+    * the part this hardware workgroup exports. */
+   unsigned prim_parts;
+   unsigned part_prims;
+   nir_def *part;
+
+   /* ac_nir_lower_ngg_options.ms_publish: the first part runs the API
+    * workgroup and publishes its outputs in a slot of the ring, which the
+    * other parts copy back from. A slot holds the output counts, the LDS
+    * outputs (from lds.vtx_attr.addr on) and the outputs the scratch ring
+    * would hold. Its header counts the slot's turns: turn t is free at
+    * t * parts, published at t * parts + 1, and each later part adds one when
+    * it is done with it, which frees it for turn t + 1.
+    */
+   bool publish;
+   unsigned publish_slots;
+   unsigned slot_bytes;
+   unsigned slot_lds_bytes;
+   unsigned slot_scratch_offset;
+   nir_def *header_addr;
+   nir_def *slot_addr;
+   nir_def *free_value;
+   /* No later workgroup of the draw packet takes this slot. */
+   nir_def *last_turn;
 } lower_ngg_ms_state;
+
+/* A published slot: the counts, then the LDS outputs, then the scratch ones. */
+#define MS_PUBLISH_COUNTS_BYTES 16
 
 static void
 ms_store_prim_indices(nir_builder *b,
@@ -314,6 +342,11 @@ ms_store_arrayed_output(nir_builder *b,
       nir_store_shared(b, store_val, addr, .base = const_off,
                      .write_mask = write_mask, .align_mul = 16,
                      .align_offset = const_off % 16);
+   } else if (out_mode == ms_out_mode_scratch_ring && s->publish) {
+      nir_def *offset = nir_iadd_imm(b, addr, s->slot_scratch_offset + const_off);
+      nir_build_store_global(b, store_val, nir_iadd(b, s->slot_addr, nir_u2u64(b, offset)),
+                             .write_mask = write_mask, .align_mul = 16, .align_offset = const_off % 16,
+                             .access = ACCESS_COHERENT);
    } else if (out_mode == ms_out_mode_scratch_ring) {
       nir_def *ring = nir_load_ring_mesh_scratch_amd(b);
       nir_def *off = nir_load_ring_mesh_scratch_offset_amd(b);
@@ -421,6 +454,11 @@ ms_load_arrayed_output(nir_builder *b,
       return nir_load_shared(b, num_components, load_bit_size, addr, .align_mul = 16,
                              .align_offset = (component_offset * 4) % 16,
                              .base = const_off);
+   } else if (out_mode == ms_out_mode_scratch_ring && s->publish) {
+      nir_def *offset = nir_iadd_imm(b, addr, s->slot_scratch_offset + const_off);
+      return nir_build_load_global(b, num_components, load_bit_size,
+                                   nir_iadd(b, s->slot_addr, nir_u2u64(b, offset)), .align_mul = 16,
+                                   .align_offset = const_off % 16, .access = ACCESS_COHERENT);
    } else if (out_mode == ms_out_mode_scratch_ring) {
       nir_def *ring = nir_load_ring_mesh_scratch_amd(b);
       nir_def *off = nir_load_ring_mesh_scratch_offset_amd(b);
@@ -485,7 +523,7 @@ update_ms_barrier(nir_builder *b,
     */
    unsigned mem_modes = nir_intrinsic_memory_modes(intrin);
    if (mem_modes & nir_var_shader_out)
-      mem_modes |= nir_var_mem_shared;
+      mem_modes |= nir_var_mem_shared | (s->publish ? nir_var_mem_global : 0);
    else
       return NULL;
 
@@ -588,14 +626,29 @@ ms_create_same_invocation_vars(nir_builder *b, lower_ngg_ms_state *s)
    }
 }
 
+/* The launch index of this hardware workgroup: the API workgroup's, and the
+ * part of its primitives it exports. */
+static void
+ms_set_workgroup_index(nir_builder *b, nir_def *launch_index, lower_ngg_ms_state *s)
+{
+   if (s->prim_parts > 1) {
+      s->workgroup_index = nir_udiv_imm(b, launch_index, s->prim_parts);
+      s->part = nir_umod_imm(b, launch_index, s->prim_parts);
+   } else {
+      s->workgroup_index = launch_index;
+   }
+}
+
 static void
 ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
 {
    /* Workgroup ID should have been lowered to workgroup index. */
    assert(!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_ID));
 
-   /* No need to do anything if the shader doesn't use the workgroup index. */
-   if (!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_INDEX))
+   /* No need to do anything if the shader doesn't use the workgroup index
+    * and exports its primitives at once. */
+   if (!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_INDEX) &&
+       s->prim_parts <= 1)
       return;
 
    b->cursor = nir_before_impl(b->impl);
@@ -611,9 +664,9 @@ ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
     */
    nir_def *workgroup_index = nir_load_vertex_id_zero_base(b);
 
-   if (s->api_workgroup_size <= s->wave_size) {
+   if (s->api_workgroup_size <= s->wave_size && s->hw_workgroup_size <= s->wave_size) {
       /* API workgroup is small, so we don't need to use LDS. */
-      s->workgroup_index = nir_read_first_invocation(b, workgroup_index);
+      ms_set_workgroup_index(b, nir_read_first_invocation(b, workgroup_index), s);
       return;
    }
 
@@ -650,7 +703,25 @@ ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
    nir_pop_if(b, if_elected);
 
    workgroup_index = nir_if_phi(b, workgroup_index, dont_care);
-   s->workgroup_index = nir_read_first_invocation(b, workgroup_index);
+   ms_set_workgroup_index(b, nir_read_first_invocation(b, workgroup_index), s);
+}
+
+/* This part's primitives of num_prm: at most part_prims from its first. */
+static nir_def *
+ms_part_prims(nir_builder *b, nir_def *num_prm, lower_ngg_ms_state *s)
+{
+   nir_def *first = nir_imul_imm(b, s->part, s->part_prims);
+   return nir_umin(b, nir_usub_sat(b, num_prm, first), nir_imm_int(b, s->part_prims));
+}
+
+static void
+ms_alloc_vertices_and_primitives(nir_builder *b, nir_def *num_vtx, nir_def *num_prm, lower_ngg_ms_state *s)
+{
+   if (s->prim_parts) {
+      num_prm = ms_part_prims(b, num_prm, s);
+      num_vtx = nir_imul_imm(b, num_prm, s->vertices_per_prim);
+   }
+   ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
 }
 
 static void
@@ -673,7 +744,7 @@ set_ms_final_output_counts(nir_builder *b,
 
    if (s->hw_workgroup_size <= s->wave_size) {
       /* Single-wave mesh shader workgroup. */
-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
+      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
       return;
    }
 
@@ -691,7 +762,7 @@ set_ms_final_output_counts(nir_builder *b,
        * allocating space for vertices/primitives.
        */
       nir_if *if_wave_0 = nir_push_if(b, nir_ieq_imm(b, nir_load_subgroup_id(b), 0));
-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
+      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
       nir_pop_if(b, if_wave_0);
       return;
    }
@@ -716,7 +787,7 @@ set_ms_final_output_counts(nir_builder *b,
                             .memory_semantics = NIR_MEMORY_ACQ_REL,
                             .memory_modes = nir_var_mem_shared);
 
-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
+      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
    }
    nir_push_else(b, if_wave_0);
    {
@@ -1008,6 +1079,234 @@ emit_ms_outputs(nir_builder *b, nir_def *invocation_index, nir_def *row_start,
    }
 }
 
+/* ac_nir_lower_ngg_options.ms_prim_parts: hardware vertex i of this part is
+ * corner i % vertices_per_prim of its primitive i / vertices_per_prim, with
+ * that API vertex's per-vertex outputs and the primitive's per-primitive
+ * ones; hardware primitive i is the part's primitive i, its own vertices.
+ */
+static void
+emit_ms_part_outputs(nir_builder *b, nir_def *invocation_index, nir_def *num_vtx, nir_def *num_prm,
+                     uint64_t per_vertex_outputs, uint64_t per_primitive_outputs, lower_ngg_ms_state *s)
+{
+   const unsigned vpp = s->vertices_per_prim;
+   nir_def *part_first = nir_imul_imm(b, s->part, s->part_prims);
+   nir_def *hw_prims = ms_part_prims(b, num_prm, s);
+   nir_def *hw_vertices = nir_imul_imm(b, hw_prims, vpp);
+
+   /* Layer and viewport go with the position, per vertex now, and so does
+    * the layer that multiview inserts.
+    */
+   const uint64_t prim_pos_outputs = (per_primitive_outputs & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)) |
+                                     (s->insert_layer_output ? VARYING_BIT_LAYER : 0);
+
+   nir_if *if_vertex = nir_push_if(b, nir_ult(b, invocation_index, hw_vertices));
+   {
+      nir_def *prim = nir_iadd(b, part_first, nir_udiv_imm(b, invocation_index, vpp));
+      nir_def *corner = nir_umod_imm(b, invocation_index, vpp);
+      nir_def *index_addr = nir_iadd(b, nir_imul_imm(b, prim, vpp), corner);
+      nir_def *vertex = nir_u2u32(b, nir_load_shared(b, 1, 8, index_addr, .base = s->layout.lds.indices_addr));
+      vertex = nir_umin(b, vertex, nir_iadd_imm(b, num_vtx, -1u));
+
+      ms_emit_arrayed_outputs(b, vertex, per_vertex_outputs, s);
+      ms_emit_arrayed_outputs(b, prim, per_primitive_outputs, s);
+      if (s->insert_layer_output) {
+         s->out.outputs[VARYING_SLOT_LAYER][0] = nir_load_view_index(b);
+         s->out.infos[VARYING_SLOT_LAYER].as_sysval_mask |= 1;
+      }
+
+      ac_nir_export_position(b, s->ac->gfx_level, s->options->export_clipdist_mask, false, false,
+                             !s->has_param_exports, false,
+                             s->per_vertex_outputs | VARYING_BIT_POS | prim_pos_outputs, &s->out, NULL);
+      if (s->has_param_exports)
+         ac_nir_export_parameters(b, s->vs_output_param_offset, per_vertex_outputs | per_primitive_outputs, 0,
+                                  &s->out);
+   }
+   nir_pop_if(b, if_vertex);
+
+   nir_if *if_primitive = nir_push_if(b, nir_ult(b, invocation_index, hw_prims));
+   {
+      nir_def *prim = nir_iadd(b, part_first, invocation_index);
+      nir_def *cull_flag = NULL;
+      if (s->uses_cull_flags) {
+         nir_def *flag = nir_load_shared(b, 1, 8, nir_imul_imm(b, prim, vpp), .base = s->layout.lds.cull_flags_addr);
+         cull_flag = nir_i2b(b, nir_u2u32(b, flag));
+      }
+      nir_def *indices[3];
+      for (unsigned c = 0; c < vpp; ++c)
+         indices[c] = nir_iadd_imm(b, nir_imul_imm(b, invocation_index, vpp), c);
+      ac_nir_export_primitive(b, ac_nir_pack_ngg_prim_exp_arg(b, vpp, indices, cull_flag, s->ac->gfx_level), NULL);
+   }
+   nir_pop_if(b, if_primitive);
+}
+
+/* ac_nir_lower_ngg_options.ms_publish: this API workgroup's slot, from its
+ * place among the draw packet's workgroups. Workgroups take slots in launch
+ * order, and a workgroup only ever waits for earlier ones.
+ */
+static void
+ms_publish_find_slot(nir_builder *b, lower_ngg_ms_state *s)
+{
+   nir_def *workgroup = nir_iadd(b, nir_load_ms_publish_first_workgroup_amd(b), nir_u2u64(b, s->workgroup_index));
+   nir_def *ring = nir_load_ms_publish_ring_amd(b);
+
+   nir_def *slot = nir_u2u32(b, nir_iand_imm(b, workgroup, s->publish_slots - 1));
+   nir_def *turn = nir_u2u32(b, nir_ushr_imm(b, workgroup, util_logbase2(s->publish_slots)));
+
+   /* The header wraps at 32 bits, and every comparison with it is a
+    * difference, so the turn's low 32 bits are enough.
+    */
+   s->free_value = nir_imul_imm(b, turn, s->prim_parts);
+   s->last_turn = nir_uge(b, nir_imm_int64(b, s->publish_slots),
+                          nir_isub(b, nir_load_ms_publish_workgroups_amd(b), workgroup));
+   s->header_addr = nir_iadd(b, ring, nir_u2u64(b, nir_imul_imm(b, slot, 4)));
+   s->slot_addr = nir_iadd(b, ring, nir_u2u64(b, nir_iadd_imm(b, nir_imul_imm(b, slot, s->slot_bytes),
+                                                             AC_MS_PUBLISH_HEADER_BYTES)));
+}
+
+/* The workgroup's first invocation waits until the slot's header is within
+ * count of first; then the workgroup goes on, reading what the header's
+ * writer wrote.
+ */
+static void
+ms_publish_wait(nir_builder *b, nir_def *first, unsigned count, lower_ngg_ms_state *s)
+{
+   nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+   {
+      nir_loop *loop = nir_push_loop(b);
+      {
+         nir_def *header = nir_build_load_global(b, 1, 32, s->header_addr, .align_mul = 4,
+                                                 .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+         nir_break_if(b, nir_ult_imm(b, nir_isub(b, header, first), count));
+         ac_nir_sleep(b, 64);
+      }
+      nir_pop_loop(b, loop);
+   }
+   nir_pop_if(b, if_first);
+
+   nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
+               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global | nir_var_mem_shared);
+}
+
+/* The LDS outputs to the slot or back, 16 bytes an invocation at a time. */
+static void
+ms_publish_copy_lds(nir_builder *b, bool to_slot, lower_ngg_ms_state *s)
+{
+   const unsigned chunks = s->slot_lds_bytes / 16;
+   if (!chunks)
+      return;
+
+   nir_variable *chunk_var = nir_local_variable_create(b->impl, glsl_uint_type(), "ms_publish_chunk");
+   nir_store_var(b, chunk_var, nir_load_local_invocation_index(b), 0x1);
+
+   nir_loop *loop = nir_push_loop(b);
+   {
+      nir_def *chunk = nir_load_var(b, chunk_var);
+      nir_break_if(b, nir_uge_imm(b, chunk, chunks));
+
+      nir_def *lds_offset = nir_imul_imm(b, chunk, 16);
+      nir_def *addr = nir_iadd(b, s->slot_addr, nir_u2u64(b, nir_iadd_imm(b, lds_offset, MS_PUBLISH_COUNTS_BYTES)));
+      if (to_slot) {
+         nir_def *data = nir_load_shared(b, 4, 32, lds_offset, .base = s->layout.lds.vtx_attr.addr, .align_mul = 16);
+         nir_build_store_global(b, data, addr, .align_mul = 16, .access = ACCESS_COHERENT);
+      } else {
+         nir_def *data = nir_build_load_global(b, 4, 32, addr, .align_mul = 16, .access = ACCESS_COHERENT);
+         nir_store_shared(b, data, lds_offset, .base = s->layout.lds.vtx_attr.addr, .align_mul = 16);
+      }
+
+      nir_store_var(b, chunk_var, nir_iadd_imm(b, chunk, s->hw_workgroup_size), 0x1);
+   }
+   nir_pop_loop(b, loop);
+}
+
+/* After the API workgroup: the first part publishes its outputs, the others
+ * wait for them and take them as their own.
+ */
+static void
+ms_publish_outputs(nir_builder *b, lower_ngg_ms_state *s)
+{
+   nir_if *if_first_part = nir_push_if(b, nir_ieq_imm(b, s->part, 0));
+   {
+      ms_publish_copy_lds(b, true, s);
+
+      /* The first invocation has the counts, whether or not they are uniform. */
+      nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+      {
+         nir_def *counts = nir_vec2(b, nir_load_var(b, s->primitive_count_var), nir_load_var(b, s->vertex_count_var));
+         nir_build_store_global(b, counts, s->slot_addr, .align_mul = 16, .access = ACCESS_COHERENT);
+      }
+      nir_pop_if(b, if_first);
+
+      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global);
+
+      if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+      {
+         nir_global_atomic(b, 32, s->header_addr, nir_iadd_imm(b, s->free_value, 1),
+                           .atomic_op = nir_atomic_op_xchg);
+      }
+      nir_pop_if(b, if_first);
+   }
+   nir_push_else(b, if_first_part);
+   {
+      ms_publish_wait(b, nir_iadd_imm(b, s->free_value, 1), s->prim_parts - 1, s);
+      ms_publish_copy_lds(b, false, s);
+
+      nir_def *counts = nir_build_load_global(b, 2, 32, s->slot_addr, .align_mul = 16, .access = ACCESS_COHERENT);
+      nir_store_var(b, s->primitive_count_var, nir_read_first_invocation(b, nir_channel(b, counts, 0)), 0x1);
+      nir_store_var(b, s->vertex_count_var, nir_read_first_invocation(b, nir_channel(b, counts, 1)), 0x1);
+
+      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
+   }
+   nir_pop_if(b, if_first_part);
+}
+
+/* A later part done with the slot adds one to its header. The last one frees
+ * the slot for its next turn, or, when no later workgroup of the packet takes
+ * it, zeroes it for the next packet.
+ */
+static void
+ms_publish_release(nir_builder *b, lower_ngg_ms_state *s)
+{
+   nir_if *if_later_part = nir_push_if(b, nir_ine_imm(b, s->part, 0));
+   {
+      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global);
+
+      nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+      {
+         nir_def *header = nir_global_atomic(b, 32, s->header_addr, nir_imm_int(b, 1), .atomic_op = nir_atomic_op_iadd);
+         nir_def *last_reader = nir_ieq(b, header, nir_iadd_imm(b, s->free_value, s->prim_parts - 1));
+         nir_if *if_zero = nir_push_if(b, nir_iand(b, last_reader, s->last_turn));
+         {
+            nir_global_atomic(b, 32, s->header_addr, nir_imm_int(b, 0), .atomic_op = nir_atomic_op_xchg);
+         }
+         nir_pop_if(b, if_zero);
+      }
+      nir_pop_if(b, if_first);
+   }
+   nir_pop_if(b, if_later_part);
+}
+
+/* The API workgroup runs in the first part only, once it has the slot. */
+static void
+ms_publish_first_part_runs(nir_builder *b, lower_ngg_ms_state *s)
+{
+   nir_cf_list body;
+   nir_cf_extract(&body, b->cursor, nir_after_impl(b->impl));
+   b->cursor = nir_after_impl(b->impl);
+
+   ms_publish_find_slot(b, s);
+
+   nir_if *if_first_part = nir_push_if(b, nir_ieq_imm(b, s->part, 0));
+   {
+      ms_publish_wait(b, s->free_value, 1, s);
+      nir_cf_reinsert(&body, b->cursor);
+      b->cursor = nir_after_cf_list(&if_first_part->then_list);
+   }
+   nir_pop_if(b, if_first_part);
+}
+
 static void
 emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
 {
@@ -1016,7 +1315,11 @@ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
    b->cursor = nir_after_block(last_block);
 
    nir_barrier(b, .execution_scope=SCOPE_WORKGROUP, .memory_scope=SCOPE_WORKGROUP,
-                         .memory_semantics=NIR_MEMORY_ACQ_REL, .memory_modes=nir_var_shader_out|nir_var_mem_shared);
+                         .memory_semantics=NIR_MEMORY_ACQ_REL,
+                         .memory_modes=nir_var_shader_out|nir_var_mem_shared|(s->publish ? nir_var_mem_global : 0));
+
+   if (s->publish)
+      ms_publish_outputs(b, s);
 
    nir_def *num_prm;
    nir_def *num_vtx;
@@ -1049,6 +1352,14 @@ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
       b->shader->info.outputs_written |= VARYING_BIT_LAYER;
       b->shader->info.per_primitive_outputs |= VARYING_BIT_LAYER;
       per_primitive_outputs |= VARYING_BIT_LAYER;
+   }
+
+   if (s->prim_parts) {
+      emit_ms_part_outputs(b, invocation_index, num_vtx, num_prm, per_vertex_outputs,
+                           s->per_primitive_outputs & ~SPECIAL_MS_OUT_MASK, s);
+      if (s->publish)
+         ms_publish_release(b, s);
+      return;
    }
 
    const bool has_special_param_exports =
@@ -1358,6 +1669,78 @@ ms_calculate_output_layout(const struct ac_compiler_info *info, unsigned api_sha
    return l;
 }
 
+/* What a part other than the first must not repeat: memory writes and
+ * atomics outside the workgroup, and the query counters. */
+static bool
+ms_is_part_side_effect(nir_intrinsic_instr *intrin)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_store_global:
+   case nir_intrinsic_store_global_amd:
+   case nir_intrinsic_store_buffer_amd:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_global_atomic_swap:
+   case nir_intrinsic_global_atomic_amd:
+   case nir_intrinsic_global_atomic_swap_amd:
+   case nir_intrinsic_image_store:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_bindless_image_store:
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+   case nir_intrinsic_bindless_image_atomic:
+   case nir_intrinsic_bindless_image_atomic_swap:
+   case nir_intrinsic_atomic_add_gen_prim_count_amd:
+   case nir_intrinsic_atomic_add_shader_invocation_count_amd:
+      return true;
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
+      return nir_deref_mode_may_be(nir_src_as_deref(intrin->src[0]),
+                                   nir_var_mem_ssbo | nir_var_mem_global | nir_var_image);
+   default:
+      return false;
+   }
+}
+
+/* With ms_publish only the API workgroup's first part runs it, and only the
+ * finale's query counter remains to confine; the ring's own atomics must not
+ * be.
+ */
+static void
+ms_confine_side_effects_to_first_part(nir_shader *shader, lower_ngg_ms_state *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_builder b = nir_builder_create(impl);
+
+   nir_foreach_block_safe(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic || !ms_is_part_side_effect(nir_instr_as_intrinsic(instr)))
+            continue;
+         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+         if (s->publish && intrin->intrinsic != nir_intrinsic_atomic_add_gen_prim_count_amd)
+            continue;
+
+         b.cursor = nir_before_instr(instr);
+         nir_if *if_first = nir_push_if(&b, nir_ieq_imm(&b, s->part, 0));
+         nir_instr_remove(instr);
+         nir_builder_instr_insert(&b, instr);
+         nir_pop_if(&b, if_first);
+
+         if (nir_intrinsic_infos[intrin->intrinsic].has_dest && !nir_def_is_unused(&intrin->def)) {
+            nir_def *value = nir_if_phi(&b, &intrin->def, nir_undef(&b, intrin->def.num_components,
+                                                                 intrin->def.bit_size));
+            nir_def_rewrite_uses_after(&intrin->def, value);
+         }
+      }
+   }
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 bool
 ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *options,
                       bool *out_needs_scratch_ring)
@@ -1380,12 +1763,36 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
    unsigned max_vertices = shader->info.mesh.max_vertices_out;
    unsigned max_primitives = shader->info.mesh.max_primitives_out;
 
+   /* Vertices of their own per primitive are built from any API vertex and
+    * primitive: every output is read across invocations. */
+   const unsigned prim_parts = options->ms_prim_parts;
+   assert(!prim_parts || options->compiler_info->gfx_level < GFX11);
+   if (prim_parts)
+      cross_invocation_access = ~0ull;
+
    ms_out_mem_layout layout = ms_calculate_output_layout(
       options->compiler_info, shader->info.shared_size, per_vertex_outputs, per_primitive_outputs,
       cross_invocation_access, max_vertices, max_primitives, vertices_per_prim);
 
+   /* Published outputs: the LDS ones are copied 16 bytes at a time, and the
+    * scratch ring's go to the slot instead.
+    */
+   const bool publish = options->ms_publish && prim_parts > 1;
+   unsigned slot_lds_bytes = 0, slot_scratch_offset = 0, slot_bytes = 0, publish_slots = 0;
+   if (publish) {
+      layout.lds.total_size = align(layout.lds.total_size, 16);
+      assert(layout.lds.total_size <= 32 * 1024);
+      slot_lds_bytes = layout.lds.total_size - layout.lds.vtx_attr.addr;
+      slot_scratch_offset = MS_PUBLISH_COUNTS_BYTES + slot_lds_bytes;
+      const unsigned scratch_bytes =
+         layout.scratch_ring.prm_attr.addr + util_bitcount64(layout.scratch_ring.prm_attr.mask) * max_primitives * 16;
+      slot_bytes = align(slot_scratch_offset + scratch_bytes, 256);
+      publish_slots = MIN2(AC_MS_PUBLISH_MAX_SLOTS,
+                           1u << util_logbase2((AC_MS_PUBLISH_RING_BYTES - AC_MS_PUBLISH_HEADER_BYTES) / slot_bytes));
+   }
+
    shader->info.shared_size = layout.lds.total_size;
-   *out_needs_scratch_ring = layout.scratch_ring.vtx_attr.mask || layout.scratch_ring.prm_attr.mask;
+   *out_needs_scratch_ring = !publish && (layout.scratch_ring.vtx_attr.mask || layout.scratch_ring.prm_attr.mask);
 
    /* The workgroup size that is specified by the API shader may be different
     * from the size of the workgroup that actually runs on the HW, due to the
@@ -1422,6 +1829,13 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
       .output_counts_workgroup_uniform = true,
       .vs_output_param_offset = options->vs_output_param_offset,
       .has_param_exports = options->has_param_exports,
+      .prim_parts = prim_parts,
+      .part_prims = prim_parts ? DIV_ROUND_UP(max_primitives, prim_parts) : 0,
+      .publish = publish,
+      .publish_slots = publish_slots,
+      .slot_bytes = slot_bytes,
+      .slot_lds_bytes = slot_lds_bytes,
+      .slot_scratch_offset = slot_scratch_offset,
    };
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -1438,11 +1852,20 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
    handle_smaller_ms_api_workgroup(b, &state);
    if (!fast_launch_2)
       ms_emit_legacy_workgroup_index(b, &state);
+   if (!state.part) {
+      b->cursor = nir_before_impl(impl);
+      state.part = nir_imm_int(b, 0);
+   }
+   if (state.publish)
+      ms_publish_first_part_runs(b, &state);
    ms_create_same_invocation_vars(b, &state);
 
    lower_ms_intrinsics(shader, &state);
 
    emit_ms_finale(b, &state);
+
+   if (prim_parts > 1)
+      ms_confine_side_effects_to_first_part(shader, &state);
 
    /* Take care of metadata and validation before calling other passes */
    nir_progress(true, impl, nir_metadata_none);

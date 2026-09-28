@@ -266,6 +266,14 @@ struct radv_shader_info {
       bool needs_ms_scratch_ring;
       bool has_task; /* If mesh shader is used together with a task shader. */
       bool has_query;
+      /* Without per-primitive parameters, the parts a workgroup exports its
+       * primitives in, each on vertices of its own (ac_nir_lower_ngg_options
+       * ms_prim_parts); 0 with them. */
+      uint8_t prim_parts;
+      /* The workgroup count comes from the draw's record in memory
+       * (radv_mesh_draw_record), not user SGPRs; so does what a shader that
+       * publishes its outputs needs (radv_ms_publishes). */
+      bool draw_records;
    } ms;
 
    struct radv_streamout_info so;
@@ -372,5 +380,14 @@ enum ac_hw_stage radv_select_hw_stage(const struct radv_shader_info *const info,
 uint64_t radv_gather_unlinked_io_mask(const uint64_t nir_mask);
 
 uint64_t radv_gather_unlinked_patch_io_mask(const uint64_t nir_io_mask, const uint32_t nir_patch_io_mask);
+
+/* A mesh shader whose parts take the first part's outputs from the publish
+ * ring (ac_nir_lower_ngg_options.ms_publish) instead of running the API
+ * workgroup again each. */
+static inline bool
+radv_ms_publishes(const struct radv_shader_info *info)
+{
+   return info->ms.prim_parts > 1 && info->ms.draw_records;
+}
 
 #endif /* RADV_SHADER_INFO_H */

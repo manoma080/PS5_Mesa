@@ -33,6 +33,9 @@ bool radv_nir_lower_descriptors(nir_shader *shader, const struct radv_compiler_i
 bool radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struct radv_shader_stage *stage,
                         const struct radv_graphics_state_key *gfx_state, uint32_t address32_hi);
 
+bool radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage,
+                                      uint32_t address32_hi);
+
 bool radv_nir_lower_hit_attrib_derefs(nir_shader *shader);
 
 bool radv_nir_lower_ray_payload_derefs(nir_shader *shader, uint32_t offset);

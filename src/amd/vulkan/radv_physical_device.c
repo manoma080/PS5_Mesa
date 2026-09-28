@@ -80,6 +80,23 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
    return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
 }
 
+/* Mesh shaders without task shaders, which RADV runs on an asynchronous
+ * compute queue the PS5 does not offer (taskShader is a feature of its own).
+ * Without per-primitive parameters a workgroup's primitives go out in parts,
+ * the first publishing what the others export (ac_nir_lower_ngg_mesh).
+ */
+static bool
+radv_mesh_enabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   if (radv_taskmesh_enabled(pdev))
+      return true;
+   if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
+      return false;
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3;
+}
+
 bool
 radv_spm_trace_enabled(const struct radv_physical_device *pdev)
 {
@@ -914,7 +931,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_map_memory_placed = true,
       .EXT_memory_budget = true,
       .EXT_memory_priority = true,
-      .EXT_mesh_shader = radv_taskmesh_enabled(pdev),
+      .EXT_mesh_shader = radv_mesh_enabled(pdev),
       .EXT_multi_draw = true,
       .EXT_multisampled_render_to_single_sampled = radv_msrtss_enabled(pdev),
       .EXT_mutable_descriptor_type = true, /* Trivial promotion from VALVE. */
@@ -1372,9 +1389,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .minLod = true,
 
       /* VK_EXT_mesh_shader */
-      .meshShader = taskmesh_en,
+      .meshShader = radv_mesh_enabled(pdev),
       .taskShader = taskmesh_en,
-      .multiviewMeshShader = taskmesh_en,
+      .multiviewMeshShader = radv_mesh_enabled(pdev),
       .primitiveFragmentShadingRateMeshShader = taskmesh_en && pdev->info.has_vrs,
       .meshShaderQueries = false,
 
@@ -1806,7 +1823,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    const bool enable_sparse = radv_sparse_enabled(pdev);
 
    VkShaderStageFlags taskmesh_stages =
-      radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
+      (radv_mesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT : 0) |
+      (radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
    VkShaderStageFlags rt_stages = radv_rt_pipelines_enabled(pdev) ? RADV_RT_STAGE_BITS : 0;
 
    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
@@ -2364,7 +2382,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .pipelineBinaryCompressedData = false,
 
       /* VK_KHR_compute_shader_derivatives */
-      .meshAndTaskShaderDerivatives = radv_taskmesh_enabled(pdev),
+      .meshAndTaskShaderDerivatives = radv_mesh_enabled(pdev),
 
       /* VK_EXT_device_generated_commands */
       .maxIndirectPipelineCount = 4096,

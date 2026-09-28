@@ -309,8 +309,21 @@ declare_tes_input_vgprs(struct radv_shader_args_state *state)
 }
 
 static void
-declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_shader_info *info)
+declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_compiler_info *compiler_info,
+                       const struct radv_shader_info *info)
 {
+   if (compiler_info->key.mesh_draw_records) {
+      /* Launched by DRAW_INDIRECT_MULTI as well, which writes the first
+       * vertex (always 0) and the draw ID here.
+       */
+      RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.base_vertex, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
+      if (info->vs.needs_draw_id)
+         RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.draw_id, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
+      if (info->ms.draw_records)
+         RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ms_draw_records, AC_UD_VS_MS_DRAW_RECORDS);
+      return;
+   }
+
    if (info->cs.uses_grid_size) {
       RADV_ADD_UD_ARG(state, 3, AC_ARG_VALUE, ac.num_work_groups, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
    }
@@ -818,7 +831,7 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
             if (previous_stage == MESA_SHADER_VERTEX) {
                declare_vs_specific_input_sgprs(state, info);
             } else if (previous_stage == MESA_SHADER_MESH) {
-               declare_ms_input_sgprs(state, info);
+               declare_ms_input_sgprs(state, compiler_info, info);
             }
 
             declare_global_input_sgprs(state, gfx_level, info, user_sgpr_info);

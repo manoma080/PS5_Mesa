@@ -299,6 +299,7 @@ struct radeon_info {
    bool has_vrs_ds_export_bug;
    bool has_vrs_export_bug;
    bool has_taskmesh_indirect0_bug;
+   bool has_dispatch_mesh_indirect; /* DISPATCH_MESH_INDIRECT_MULTI */
    bool sdma_supports_sparse;      /* Whether SDMA can safely access sparse resources. */
    bool sdma_supports_compression; /* Whether SDMA supports DCC and HTILE. */
    bool has_set_context_pairs;
@@ -626,6 +627,15 @@ uint32_t ac_gfx103_get_cu_mask_ps(const struct radeon_info *info);
  * That is a total of 32+4+4=40 output slots x 16 bytes per slot x 256 = 160K bytes.
  */
 #define AC_MESH_SCRATCH_ENTRY_BYTES (160 * 1024)
+
+/* The ring a mesh shader exporting its primitives in parts publishes its
+ * outputs in (ac_nir_lower_ngg_options.ms_publish): a header dword per slot,
+ * then the slots, as many as fit, AC_MS_PUBLISH_MAX_SLOTS at most. Zeroed
+ * when created; each draw packet leaves it zeroed.
+ */
+#define AC_MS_PUBLISH_RING_BYTES (16 * 1024 * 1024)
+#define AC_MS_PUBLISH_MAX_SLOTS 256
+#define AC_MS_PUBLISH_HEADER_BYTES (AC_MS_PUBLISH_MAX_SLOTS * 4)
 
 #ifdef __cplusplus
 }

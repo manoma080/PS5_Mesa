@@ -414,6 +414,26 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
       *per_prim_mask |= VARYING_BIT_LAYER;
 }
 
+/* A mesh shader's per-primitive outputs on a GPU without per-primitive
+ * parameters (GFX10.1's parameter cache, which the PS5 has): each primitive
+ * gets vertices of its own and its outputs go per vertex, in as many parts as
+ * one NGG subgroup's 256 vertices need. */
+static unsigned
+radv_ms_prim_parts(const struct ac_compiler_info *ac, const struct nir_shader *nir,
+                   const struct radv_graphics_state_key *gfx_state)
+{
+   if (nir->info.stage != MESA_SHADER_MESH || ac->has_ngg_per_prim_params)
+      return 0;
+
+   uint64_t per_vtx_mask, per_prim_mask;
+   radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
+   if (!per_prim_mask)
+      return 0;
+
+   const unsigned vertices_per_prim = mesa_vertices_per_prim(nir->info.mesh.primitive_type);
+   return MAX2(DIV_ROUND_UP(nir->info.mesh.max_primitives_out * vertices_per_prim, 256), 1);
+}
+
 static void
 radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_shader *nir,
                          const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
@@ -473,6 +493,10 @@ radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_sha
 
    /* Per-primitive outputs: the HW needs these to be last. */
    assign_outinfo_params(outinfo, per_prim_mask, &total_param_exports, extra_offset);
+
+   /* Without per-primitive parameters they are per-vertex ones, still last. */
+   if (radv_ms_prim_parts(ac, nir, gfx_state))
+      outinfo->param_exports = total_param_exports;
 
    outinfo->prim_param_exports = total_param_exports - outinfo->param_exports;
 }
@@ -765,6 +789,13 @@ gather_shader_info_mesh(const struct radv_compiler_info *compiler_info, const ni
    ngg_info->max_vert_out_per_gs_instance = false;
    ngg_info->ngg_emit_size = 0;
    ngg_info->prim_amp_factor = nir->info.mesh.max_primitives_out;
+
+   /* A part's primitives, on vertices of their own. */
+   if (info->ms.prim_parts) {
+      const unsigned part_prims = DIV_ROUND_UP(nir->info.mesh.max_primitives_out, info->ms.prim_parts);
+      ngg_info->max_out_verts = part_prims * mesa_vertices_per_prim(nir->info.mesh.primitive_type);
+      ngg_info->prim_amp_factor = part_prims;
+   }
    ngg_info->vgt_esgs_ring_itemsize = 1;
 
    info->ms.has_query = compiler_info->key.mesh_shader_queries;
@@ -1072,6 +1103,18 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
       outinfo->writes_layer_per_primitive = per_prim_mask & VARYING_BIT_LAYER;
       outinfo->writes_primitive_shading_rate_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_SHADING_RATE;
       outinfo->export_prim_id_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_ID;
+
+      /* Without per-primitive parameters, on vertices of their own. */
+      if (nir->info.stage == MESA_SHADER_MESH)
+         info->ms.prim_parts = radv_ms_prim_parts(compiler_info->ac, nir, gfx_state);
+      if (nir->info.stage == MESA_SHADER_MESH && info->ms.prim_parts) {
+         outinfo->writes_viewport_index |= outinfo->writes_viewport_index_per_primitive;
+         outinfo->writes_layer |= outinfo->writes_layer_per_primitive;
+         outinfo->export_prim_id |= outinfo->export_prim_id_per_primitive;
+         outinfo->writes_viewport_index_per_primitive = false;
+         outinfo->writes_layer_per_primitive = false;
+         outinfo->export_prim_id_per_primitive = false;
+      }
    }
 
    info->vs.needs_draw_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
@@ -1081,9 +1124,18 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
    info->uses_invocation_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INVOCATION_ID);
    info->uses_prim_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
 
-   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11. */
+   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11, where
+    * DISPATCH_MESH_INDIRECT_MULTI writes it, but for draw records.
+    */
    info->cs.uses_grid_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS) ||
-                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11);
+                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11 &&
+                              !compiler_info->key.mesh_draw_records);
+   if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records &&
+       (info->cs.uses_grid_size || info->ms.prim_parts > 1)) {
+      /* A draw's record is found by its draw ID. */
+      info->ms.draw_records = true;
+      info->vs.needs_draw_id = true;
+   }
    info->cs.uses_local_invocation_idx = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_LOCAL_INVOCATION_INDEX) |
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SUBGROUP_ID) |
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS) |

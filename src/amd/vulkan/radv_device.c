@@ -1230,6 +1230,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .no_implicit_varying_subgroup_size = instance->drirc.debug.no_implicit_varying_subgroup_size,
             .force_nan_preserve_min_max = instance->drirc.debug.force_nan_preserve_min_max,
             .nir_debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
+            .mesh_draw_records = radv_mesh_draw_records_enabled(pdev),
             .force_aniso = device->force_aniso,
             /* Use CHIP_UNKNOWN for increased compatiblity between caches. */
             .family = pdev->use_llvm ? pdev->info.family : CHIP_UNKNOWN,
@@ -1353,6 +1354,11 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
    if (device->zero_bo) {
       device->ws->buffer_make_resident(device->ws, device->zero_bo, false);
       radv_bo_destroy(device, NULL, device->zero_bo);
+   }
+
+   if (device->ms_publish_ring) {
+      device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, false);
+      radv_bo_destroy(device, NULL, device->ms_publish_ring);
    }
 
    if (device->gfx_init)
@@ -1680,6 +1686,22 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          goto fail;
 
       result = device->ws->buffer_make_resident(device->ws, device->zero_bo, true);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Zeroed, as every draw packet leaves it; its address goes in a record's
+    * 32 bits. */
+   if (device->vk.enabled_features.meshShader && radv_mesh_draw_records_enabled(pdev) &&
+       !pdev->info.compiler_info.has_ngg_per_prim_params) {
+      result = radv_bo_create(device, NULL, AC_MS_PUBLISH_RING_BYTES, 4096, RADEON_DOMAIN_VRAM,
+                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM |
+                                 RADEON_FLAG_32BIT,
+                              RADV_BO_PRIORITY_SCRATCH, 0, true, &device->ms_publish_ring);
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      result = device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, true);
       if (result != VK_SUCCESS)
          goto fail;
    }

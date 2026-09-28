@@ -508,6 +508,8 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
                .allow_fp16 = gfx_level >= GFX9,
             });
 
+   NIR_PASS(_, stage->nir, radv_nir_lower_mesh_draw_records, stage, compiler_info->hw.address32_hi);
+
    NIR_PASS(
       _, stage->nir, ac_nir_lower_intrinsics_to_args, &stage->args.ac,
       &(ac_nir_lower_intrinsics_to_args_options){
