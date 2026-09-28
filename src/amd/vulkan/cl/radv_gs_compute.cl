@@ -367,3 +367,30 @@ radv_gs_compute_tess_prefix_sum(global struct poly_tess_params *p)
    draw[2] = 0;
    draw[3] = 0;
 }
+
+/* After tessellation, a geometry shader's primitive ID counts the primitives
+ * presented to it since its instance started, as Vulkan resets it per
+ * instance, where the draw of the tessellator's output holds every
+ * instance's primitives in one: the instance's first primitive comes off.
+ * Instances' patches are consecutive and counts[] holds the inclusive prefix
+ * sum of their indices. */
+uint
+radv_gs_compute_tess_primitive_id(constant struct poly_tess_params *p, uint raw, uint vertices_per_prim)
+{
+   const uint per_instance = p->patches_per_instance;
+   if (per_instance == 0 || p->nr_patches <= per_instance)
+      return raw;
+
+   /* The last instance whose first index is at most this primitive's. */
+   const uint index = raw * vertices_per_prim;
+   uint lo = 0, hi = p->nr_patches / per_instance - 1;
+   while (lo < hi) {
+      const uint mid = (lo + hi + 1) / 2;
+      if (p->counts[mid * per_instance - 1] <= index)
+         lo = mid;
+      else
+         hi = mid - 1;
+   }
+   const uint first = lo ? p->counts[lo * per_instance - 1] : 0;
+   return raw - first / vertices_per_prim;
+}

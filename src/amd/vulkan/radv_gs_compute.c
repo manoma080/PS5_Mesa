@@ -154,6 +154,41 @@ radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key
    return outputs;
 }
 
+/* After tessellation the primitive ID restarts with each instance
+ * (radv_gs_compute_tess_primitive_id); without tessellation parameters in
+ * the draw block, poly's own ID stands. */
+static void
+lower_tess_primitive_id(nir_shader *gs)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(gs);
+   struct util_dynarray loads;
+   util_dynarray_init(&loads, NULL);
+   nir_foreach_block (block, impl) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_primitive_id)
+            util_dynarray_append(&loads, nir_instr_as_intrinsic(instr));
+      }
+   }
+
+   nir_builder b = nir_builder_create(impl);
+   const unsigned vertices_per_prim = mesa_vertices_per_prim(gs->info.gs.input_primitive);
+   util_dynarray_foreach (&loads, nir_intrinsic_instr *, load) {
+      b.cursor = nir_before_instr(&(*load)->instr);
+      nir_def *raw = nir_load_primitive_id(&b);
+      nir_def *params = nir_load_tess_param_buffer_poly(&b);
+      nir_def *adjusted;
+      nir_push_if(&b, nir_ine_imm(&b, params, 0));
+      {
+         adjusted = radv_gs_compute_tess_primitive_id(&b, params, raw, nir_imm_int(&b, vertices_per_prim));
+      }
+      nir_pop_if(&b, NULL);
+      nir_def_replace(&(*load)->def, nir_if_phi(&b, adjusted, raw));
+   }
+   util_dynarray_fini(&loads);
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 /* The geometry shader's half: poly's count pass, pre-GS setup, the GS proper
  * (out->nir) and the rasterization copy (returned). The GS reads the vertex
  * outputs through the mask the draw passes (poly's vertex parameters), so this
@@ -167,6 +202,8 @@ radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key
    /* poly keeps the memory writes in a count pass only when the shader's
     * information says it writes memory: gather it again after lowering. */
    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
+
+   lower_tess_primitive_id(gs);
 
    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
    NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
