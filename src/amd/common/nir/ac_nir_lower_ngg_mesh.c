@@ -1061,8 +1061,11 @@ emit_ms_part_outputs(nir_builder *b, nir_def *invocation_index, nir_def *num_vtx
    nir_def *hw_prims = ms_part_prims(b, num_prm, s);
    nir_def *hw_vertices = nir_imul_imm(b, hw_prims, vpp);
 
-   /* Layer and viewport go with the position, per vertex now. */
-   const uint64_t prim_pos_outputs = per_primitive_outputs & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT);
+   /* Layer and viewport go with the position, per vertex now, and so does
+    * the layer that multiview inserts.
+    */
+   const uint64_t prim_pos_outputs = (per_primitive_outputs & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)) |
+                                     (s->insert_layer_output ? VARYING_BIT_LAYER : 0);
 
    nir_if *if_vertex = nir_push_if(b, nir_ult(b, invocation_index, hw_vertices));
    {
