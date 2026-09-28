@@ -239,6 +239,12 @@ radv_ps5_window_replayable(void)
 static void
 radv_ps5_platform_once(void)
 {
+   /* RADV's shader cache in the title's own folder, as ps5vk kept its compiled
+    * shaders there (ps5vk-shader-cache), in the database form, which needs no
+    * file mapping. A title may choose otherwise, as on Linux. */
+   setenv("MESA_SHADER_CACHE_DIR", "/app0/radv-shader-cache", 0);
+   setenv("MESA_DISK_CACHE_DATABASE", "1", 0);
+
    radv_ps5_agc_result = sceAgcInit(PS5_AGC_INIT_VERSION);
    if (radv_ps5_agc_result != 0)
       fprintf(stderr, "radv/ps5: sceAgcInit(%u) failed: 0x%08x\n", PS5_AGC_INIT_VERSION,

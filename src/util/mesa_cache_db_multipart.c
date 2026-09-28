@@ -47,8 +47,17 @@ mesa_cache_db_multipart_init_part_locked(struct mesa_cache_db_multipart *db,
    if (asprintf(&part_path, "%s/part%u", db->cache_path, part) == -1)
       return false;
 
+#if defined(__PROSPERO__)
+   /* A PS5 title's folders stay open to the console's FTP service, which
+    * runs as another user: 0777, whatever the umask, parts an earlier build
+    * made included. */
+   if (mkdir(part_path, 0777) == -1 && errno != EEXIST)
+      goto free_path;
+   chmod(part_path, 0777);
+#else
    if (mkdir(part_path, 0755) == -1 && errno != EEXIST)
       goto free_path;
+#endif
 
    db_part = calloc(1, sizeof(*db_part));
    if (!db_part)
