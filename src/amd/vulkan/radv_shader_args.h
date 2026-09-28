@@ -53,6 +53,7 @@ enum radv_ud_index {
    AC_UD_CS_TASK_IB,
    AC_UD_CS_GS_COMPUTE_DRAW,           /* radv_gs_compute.h: the draw block */
    AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS, /* and the vertex shader's vertex buffers */
+   AC_UD_CS_TASK_EMU,                  /* radv_task_emu_block: an emulated task draw's chunk */
    AC_UD_CS_MAX_UD,
    AC_UD_GS_MAX_UD,
    AC_UD_TCS_OFFCHIP_LAYOUT = AC_UD_VS_MAX_UD,
@@ -85,6 +86,9 @@ struct radv_shader_args {
 
    /* A mesh shader's draw records (radv_mesh_draw_record). */
    struct ac_arg ms_draw_records;
+
+   /* An emulated task shader's chunk (radv_task_emu_block). */
+   struct ac_arg task_emu;
 
    struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
 

@@ -1231,6 +1231,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .force_nan_preserve_min_max = instance->drirc.debug.force_nan_preserve_min_max,
             .nir_debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
             .mesh_draw_records = radv_mesh_draw_records_enabled(pdev),
+            .task_emulation = radv_task_emulated(pdev),
             .force_aniso = device->force_aniso,
             /* Use CHIP_UNKNOWN for increased compatiblity between caches. */
             .family = pdev->use_llvm ? pdev->info.family : CHIP_UNKNOWN,
@@ -1359,6 +1360,11 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
    if (device->ms_publish_ring) {
       device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, false);
       radv_bo_destroy(device, NULL, device->ms_publish_ring);
+   }
+
+   if (device->task_emu_bo) {
+      device->ws->buffer_make_resident(device->ws, device->task_emu_bo, false);
+      radv_bo_destroy(device, NULL, device->task_emu_bo);
    }
 
    if (device->gfx_init)
@@ -1702,6 +1708,19 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          goto fail;
 
       result = device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, true);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Its records are read through a 32-bit address. */
+   if (device->vk.enabled_features.taskShader && radv_task_emulated(pdev)) {
+      result = radv_bo_create(device, NULL, RADV_TASK_EMU_BYTES, 4096, RADEON_DOMAIN_VRAM,
+                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT,
+                              RADV_BO_PRIORITY_SCRATCH, 0, true, &device->task_emu_bo);
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      result = device->ws->buffer_make_resident(device->ws, device->task_emu_bo, true);
       if (result != VK_SUCCESS)
          goto fail;
    }

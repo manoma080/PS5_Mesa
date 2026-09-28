@@ -314,6 +314,14 @@ bool radv_transfer_queue_enabled(const struct radv_physical_device *pdev);
 
 bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 
+/* Task shaders without the compute ring RADV runs them on (the PS5, which also
+ * lacks the CP's task and mesh dispatch packets): each task draw becomes, in
+ * chunks, a compute dispatch of the task shader on the graphics ring writing
+ * the task rings as ordinary buffers, the draw records of its mesh workgroups
+ * (radv_mesh_draw_records_enabled) and their draw (radv_cmd_buffer.c,
+ * radv_task_emulation). */
+bool radv_task_emulated(const struct radv_physical_device *pdev);
+
 bool radv_spm_trace_enabled(const struct radv_physical_device *pdev);
 
 bool radv_tmz_enabled(const struct radv_physical_device *pdev);

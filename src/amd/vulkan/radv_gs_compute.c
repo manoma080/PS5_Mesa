@@ -326,8 +326,10 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
    nir_shader *const rast = radv_gs_compute_split_gs(gs_stage->nir, &gs_stage->key, out);
 
    /* The pipeline's hardware vertex shader is the rasterization copy; there is
-    * no hardware geometry shader, and no hardware tessellation. */
+    * no hardware geometry shader, and no hardware tessellation. The copy runs
+    * the geometry shader again, with its dynamic buffers. */
    vs_stage->nir = rast;
+   vs_stage->layout.use_dynamic_descriptors |= gs_stage->layout.use_dynamic_descriptors;
    vs_stage->next_stage = MESA_SHADER_FRAGMENT;
    gs_stage->nir = NULL;
    gs_stage->stage = MESA_SHADER_NONE;
@@ -571,6 +573,11 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
    radv_nir_shader_info_pass(compiler_info, nir, &stage.layout, &stage.key, NULL, RADV_PIPELINE_COMPUTE, false,
                              &stage.info);
    stage.info.gs_compute = kind;
+   /* A graphics stage still, whose dynamic buffers' offsets come as a
+    * graphics stage's do with independent sets (radv_nir_lower_descriptors),
+    * which the pass above only gives graphics stages. */
+   if (stage.info.loads_dynamic_offsets && stage.layout.independent_sets)
+      stage.info.loads_dynamic_descriptors_offset_addr = true;
    if (kind == RADV_GS_COMPUTE_VS)
       stage.info.vs = vs_info.vs;
 

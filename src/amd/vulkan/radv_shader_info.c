@@ -946,11 +946,16 @@ gather_shader_info_task(const struct radv_compiler_info *compiler_info, const ni
     * use them.
     */
 
-   /* Needed to address the task draw/payload rings. */
+   /* Needed to address the task draw/payload rings. Emulated, the task
+    * workgroups of a chunk are dispatched in one dimension, and their grid and
+    * draw come from the chunk's block (radv_task_emu_block). */
    info->cs.uses_block_id[0] = true;
-   info->cs.uses_block_id[1] = true;
-   info->cs.uses_block_id[2] = true;
-   info->cs.uses_grid_size = true;
+   info->cs.uses_block_id[1] = !compiler_info->key.task_emulation;
+   info->cs.uses_block_id[2] = !compiler_info->key.task_emulation;
+   info->cs.uses_grid_size = !compiler_info->key.task_emulation;
+   info->cs.task_payload_size = nir->info.task_payload_size;
+   if (compiler_info->key.task_emulation)
+      info->vs.needs_draw_id = false;
 
    /* Needed for storing draw ready only on the 1st thread. */
    info->cs.uses_local_invocation_idx = true;
@@ -1131,7 +1136,7 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
                              (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11 &&
                               !compiler_info->key.mesh_draw_records);
    if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records &&
-       (info->cs.uses_grid_size || info->ms.prim_parts > 1)) {
+       (info->cs.uses_grid_size || info->ms.prim_parts > 1 || stage_key->has_task_shader)) {
       /* A draw's record is found by its draw ID. */
       info->ms.draw_records = true;
       info->vs.needs_draw_id = true;

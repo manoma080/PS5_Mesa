@@ -60,6 +60,18 @@
 #define RING_HS_TESS_OFFCHIP     6
 #define RING_TS_DRAW             7
 #define RING_TS_PAYLOAD          8
+
+/* Emulated task shaders' memory (radv_device.task_emu_bo): a chunk of up to
+ * RADV_TASK_EMU_MAX_ENTRIES task workgroups at a time, their mesh draw
+ * records (64 bytes each), their task draw ring entries (16 bytes each) and
+ * their payloads, as many as fit RADV_TASK_EMU_PAYLOAD_BYTES at the
+ * pipeline's payload size. */
+#define RADV_TASK_EMU_MAX_ENTRIES      65536u
+#define RADV_TASK_EMU_PAYLOAD_BYTES    (64u << 20)
+#define RADV_TASK_EMU_RECORDS_OFFSET   0u
+#define RADV_TASK_EMU_DRAW_RING_OFFSET (RADV_TASK_EMU_MAX_ENTRIES * 64u)
+#define RADV_TASK_EMU_PAYLOAD_OFFSET   (RADV_TASK_EMU_DRAW_RING_OFFSET + RADV_TASK_EMU_MAX_ENTRIES * 16u)
+#define RADV_TASK_EMU_BYTES            (RADV_TASK_EMU_PAYLOAD_OFFSET + RADV_TASK_EMU_PAYLOAD_BYTES)
 #define RING_MS_SCRATCH          9
 #define RING_PS_ATTR             10
 #define RING_PS_SAMPLE_POSITIONS 11
