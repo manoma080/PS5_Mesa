@@ -2107,7 +2107,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxDiscardRectangles = MAX_DISCARD_RECTANGLES,
 
       /* VK_EXT_external_memory_host */
-      .minImportedHostPointerAlignment = 4096,
+      .minImportedHostPointerAlignment = MAX2(4096, pdev->info.gart_page_size),
 
       /* VK_AMD_shader_core_properties */
       /* Shader engines. */

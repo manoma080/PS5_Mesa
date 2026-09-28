@@ -103,6 +103,9 @@ struct radv_ps5_bo {
    /* A sparse resource's range (RADEON_FLAG_VIRTUAL): memory is the reserved
     * range, and buffers are bound into it. */
    bool sparse;
+   /* Host memory the application owns (buffer_from_ptr), which the buffer
+    * does not free. */
+   bool imported;
 };
 
 static inline struct radv_ps5_bo *

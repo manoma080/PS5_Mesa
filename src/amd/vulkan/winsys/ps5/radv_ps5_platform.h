@@ -66,6 +66,11 @@ void radv_ps5_memory_free(struct radv_ps5_memory *memory);
 bool radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
                                       struct radv_ps5_memory *out);
 
+/* Host memory the application allocated, given GPU read and write access
+ * where the CPU keeps its own: the GPU then reaches it at the CPU's address
+ * (VK_EXT_external_memory_host). Whole pages. */
+bool radv_ps5_memory_grant_gpu(void *address, uint64_t bytes);
+
 /* Sparse resources: a range reserved in the device-memory region, or in the
  * window for one the shaders reach through a 32-bit pointer (a descriptor
  * buffer), unbound (the shared zero block) until pieces of a buffer's memory

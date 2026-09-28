@@ -114,6 +114,11 @@ radv_ps5_buffer_destroy(struct radeon_winsys *rws, struct radeon_winsys_bo *base
       free(bo);
       return;
    }
+   /* The application's memory stays its own. */
+   if (bo->imported) {
+      free(bo);
+      return;
+   }
    p_atomic_add(&radv_ps5_allocated_bytes, -(int64_t)bo->memory.bytes);
    if (bo->base.initial_domain & RADEON_DOMAIN_VRAM)
       p_atomic_add(&ws->allocated_vram, -(int64_t)bo->memory.bytes);
@@ -160,12 +165,31 @@ static VkResult
 radv_ps5_buffer_from_ptr(struct radeon_winsys *rws, void *pointer, uint64_t size, unsigned priority,
                          struct radeon_winsys_bo **out_bo)
 {
-   (void)rws;
-   (void)pointer;
-   (void)size;
    (void)priority;
+   struct radv_ps5_winsys *const ws = radv_ps5_winsys(rws);
    *out_bo = NULL;
-   return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   /* Host memory the application owns, at the address the CPU uses, once it
+    * has GPU access. */
+   const uint64_t va = (uint64_t)(uintptr_t)pointer;
+   if (!size || va % RADV_PS5_PAGE_BYTES || size % RADV_PS5_PAGE_BYTES || va >= RADV_PS5_GPU_ADDRESS_LIMIT ||
+       size > RADV_PS5_GPU_ADDRESS_LIMIT - va || !radv_ps5_memory_grant_gpu(pointer, size))
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
+   if (!bo)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   bo->ws = ws;
+   bo->imported = true;
+   bo->memory = (struct radv_ps5_memory){.cpu = pointer, .bytes = size, .physical = -1};
+   bo->base.va = va;
+   bo->base.size = size;
+   bo->base.is_local = false;
+   bo->base.use_global_list = true;
+   bo->base.initial_domain = RADEON_DOMAIN_GTT;
+   bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
+   *out_bo = &bo->base;
+   return VK_SUCCESS;
 }
 
 static VkResult

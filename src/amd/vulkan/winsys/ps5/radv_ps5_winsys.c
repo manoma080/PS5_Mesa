@@ -329,7 +329,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
     * lock VK_KHR_performance_query takes always failed
     * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
    info->has_perf_counters = false;
-   info->has_dedicated_vram = true;
+   /* One pool of memory the CPU and the GPU share, which RADV presents as an
+    * integrated GPU's: a device-local heap and a host heap over it, with
+    * host-cached types. The CPU's mapping of that memory is cached and the GPU
+    * reads and writes it coherently with the CPU's caches (the RADV smoke
+    * title's coherence probe). */
+   info->has_dedicated_vram = false;
    info->all_vram_visible = true;
    info->address32_hi = RADV_PS5_ADDRESS32_HI;
    /* Timeline semaphores: the runtime builds them over the binary sync type
@@ -356,9 +361,9 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
    info->has_replayable_va = true;
    info->has_replayable_va_32bit = false;
    info->has_vm_always_valid = true;
-   /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
-    * made visible to the GPU is a probe still to run. */
-   info->has_userptr = false;
+   /* buffer_from_ptr gives the application's host memory GPU access, which the
+    * GPU reaches at the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */
+   info->has_userptr = true;
    info->max_submitted_ibs[AMD_IP_GFX] = 1;
 
    /* ac_query_gpu_info's own derivations, which have no kernel input. */
