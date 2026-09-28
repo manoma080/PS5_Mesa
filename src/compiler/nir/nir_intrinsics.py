@@ -2011,6 +2011,12 @@ system_value("ring_task_payload_amd", 4)
 # Address of the mesh shader scratch ring (used for excess mesh shader outputs)
 system_value("ring_mesh_scratch_amd", 4)
 system_value("ring_mesh_scratch_offset_amd", 1)
+# A mesh shader's published outputs (ac_nir_lower_ngg_options.ms_publish): the
+# ring's address, the draw's first workgroup among its draw packet's, and the
+# packet's workgroups.
+system_value("ms_publish_ring_amd", 1, bit_sizes=[64])
+system_value("ms_publish_first_workgroup_amd", 1, bit_sizes=[64])
+system_value("ms_publish_workgroups_amd", 1, bit_sizes=[64])
 # Pointer into the draw and payload rings
 system_value("task_ring_entry_amd", 1)
 # Descriptor where NGG attributes are stored on GFX11.

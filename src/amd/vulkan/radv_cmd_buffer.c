@@ -11588,7 +11588,12 @@ radv_emit_userdata_mesh(struct radv_cmd_buffer *cmd_buffer, const uint32_t x, co
    const bool uses_grid_size = mesh_shader->info.cs.uses_grid_size;
 
    if (mesh_shader->info.ms.draw_records) {
-      const struct radv_mesh_draw_record record = {.grid = {x, y, z}};
+      const struct radeon_winsys_bo *ring = radv_cmd_buffer_device(cmd_buffer)->ms_publish_ring;
+      const struct radv_mesh_draw_record record = {
+         .grid = {x, y, z},
+         .publish_ring = radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0,
+         .workgroups = (uint64_t)x * y * z,
+      };
       uint32_t offset;
 
       if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(record), &record, &offset)) {
@@ -11858,7 +11863,19 @@ radv_cs_emit_mesh_dispatch_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
    radv_gfx12_emit_wa(device, &cmd_buffer->state, cs);
 }
 
-ALWAYS_INLINE static void
+ALWAYS_INLINE /* Draw packets of a mesh shader that publishes its outputs (radv_ms_publishes)
+ * each start the publish ring from zero, which the last workgroups of the one
+ * before leave it at: the next may not start before they end.
+ */
+static void
+radv_emit_ms_publish_separation(struct radv_cmd_buffer *cmd_buffer)
+{
+   radeon_begin(cmd_buffer->cs);
+   radeon_event_write(V_028A90_VS_PARTIAL_FLUSH);
+   radeon_end();
+}
+
+static void
 radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint32_t z)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
@@ -11882,10 +11899,13 @@ radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
        * workgroup per part (radv_shader_info.ms.prim_parts). */
       const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
       const uint32_t count = x * y * z * MAX2(mesh_shader->info.ms.prim_parts, 1);
+      const bool publishes = radv_ms_publishes(&mesh_shader->info);
       if (!view_mask) {
          radv_cs_emit_draw_packet(cmd_buffer, count, 0);
       } else {
          u_foreach_bit (view, view_mask) {
+            if (publishes && view != ffs(view_mask) - 1)
+               radv_emit_ms_publish_separation(cmd_buffer);
             radv_emit_view_index(pdev, &cmd_buffer->state, cs, view);
             radv_cs_emit_draw_packet(cmd_buffer, count, 0);
          }
@@ -11925,7 +11945,10 @@ radv_emit_mesh_draw_records_packets(const struct radv_physical_device *pdev, str
       radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
                                         sizeof(struct radv_mesh_draw_record), true);
    } else {
+      const bool publishes = radv_ms_publishes(&state->shaders[MESA_SHADER_MESH]->info);
       u_foreach_bit (i, state->render.view_mask) {
+         if (publishes && i != ffs(state->render.view_mask) - 1)
+            radv_emit_ms_publish_separation(cmd_buffer);
          radv_emit_view_index(pdev, &cmd_buffer->state, cs, i);
          radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
                                            sizeof(struct radv_mesh_draw_record), true);
@@ -14068,6 +14091,15 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
    assert(!task_shader || ace_cs);
 
+   /* A mesh shader that publishes its outputs starts the ring from zero, which
+    * the last draw packet that used it leaves it at once its waves end
+    * (radv_emit_ms_publish_separation). */
+   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
+   if (mesh_shader && radv_ms_publishes(&mesh_shader->info)) {
+      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH;
+      radv_cs_add_buffer(device->ws, cs->b, device->ms_publish_ring);
+   }
+
    const VkShaderStageFlags stages =
       VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | (task_shader ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
 
@@ -15315,8 +15347,10 @@ radv_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, const struct radv_dra
    const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
    assert(mesh_shader && !cmd_buffer->state.shaders[MESA_SHADER_TASK]);
 
+   const struct radeon_winsys_bo *ring = radv_cmd_buffer_device(cmd_buffer)->ms_publish_ring;
    return radv_meta_mesh_draw_records(cmd_buffer, info->indirect_va, info->stride, info->count_va, info->count,
-                                      MAX2(mesh_shader->info.ms.prim_parts, 1));
+                                      MAX2(mesh_shader->info.ms.prim_parts, 1),
+                                      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0);
 }
 
 VKAPI_ATTR void VKAPI_CALL

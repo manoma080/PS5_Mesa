@@ -529,22 +529,50 @@ static bool
 lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 {
    const lower_abi_state *s = state;
-
-   if (intrin->intrinsic != nir_intrinsic_load_num_workgroups)
-      return false;
+   const unsigned record_bytes = sizeof(struct radv_mesh_draw_record);
 
    b->cursor = nir_before_instr(&intrin->instr);
 
    nir_def *records = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ms_draw_records),
                                              nir_imm_int(b, s->address32_hi));
-   nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, nir_load_draw_id(b), sizeof(struct radv_mesh_draw_record)),
-                                  offsetof(struct radv_mesh_draw_record, grid));
-   nir_def_replace(&intrin->def, ac_nir_load_smem(b, 3, records, offset, 4, ACCESS_CAN_SPECULATE));
+   nir_def *draw = nir_imul_imm(b, nir_load_draw_id(b), record_bytes);
+   nir_def *first_record = nir_imm_int(b, 0);
+   nir_def *value;
+
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_num_workgroups:
+      value = ac_nir_load_smem(b, 3, records, nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, grid)), 4,
+                               ACCESS_CAN_SPECULATE);
+      break;
+   case nir_intrinsic_load_ms_publish_ring_amd:
+      value = ac_nir_load_smem(b, 1, records,
+                               nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, publish_ring)), 4,
+                               ACCESS_CAN_SPECULATE);
+      value = nir_pack_64_2x32_split(b, value, nir_imm_int(b, s->address32_hi));
+      break;
+   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
+      value = ac_nir_load_smem(b, 2, records,
+                               nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, first_workgroup)), 4,
+                               ACCESS_CAN_SPECULATE);
+      value = nir_pack_64_2x32(b, value);
+      break;
+   case nir_intrinsic_load_ms_publish_workgroups_amd:
+      value = ac_nir_load_smem(b, 2, records,
+                               nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, workgroups)), 4,
+                               ACCESS_CAN_SPECULATE);
+      value = nir_pack_64_2x32(b, value);
+      break;
+   default:
+      return false;
+   }
+
+   nir_def_replace(&intrin->def, value);
    return true;
 }
 
 /* A mesh shader's workgroup count from its draw's record
- * (radv_mesh_draw_record), before the draw ID is lowered to its argument.
+ * (radv_mesh_draw_record), and what a shader that publishes its outputs reads
+ * there, before the draw ID is lowered to its argument.
  */
 bool
 radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage, uint32_t address32_hi)

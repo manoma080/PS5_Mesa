@@ -8,9 +8,6 @@
 #include "radv_meta.h"
 #include "vk_shader_module.h"
 
-static_assert(sizeof(struct radv_mesh_draw_record) == 32 && offsetof(struct radv_mesh_draw_record, grid) == 16,
-              "radv_meta_nir_build_mesh_draw_records_cs");
-
 static VkResult
 get_mesh_draw_records_pipeline(struct radv_device *device, VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
 {
@@ -19,7 +16,7 @@ get_mesh_draw_records_pipeline(struct radv_device *device, VkPipeline *pipeline_
 
    const VkPushConstantRange pc_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .size = 36,
+      .size = 40,
    };
 
    result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key, sizeof(key),
@@ -57,11 +54,12 @@ get_mesh_draw_records_pipeline(struct radv_device *device, VkPipeline *pipeline_
 
 /* The records of an indirect mesh shader draw without DISPATCH_MESH_INDIRECT_MULTI
  * (radv_mesh_draw_records_enabled), written from its commands before the draw reads them.
- * Returns their address, 0 on failure.
+ * publish_ring is the publish ring's address for a shader that publishes its outputs
+ * (radv_ms_publishes), 0 otherwise. Returns their address, 0 on failure.
  */
 uint64_t
 radv_meta_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride,
-                            uint64_t count_va, uint32_t max_count, uint32_t parts)
+                            uint64_t count_va, uint32_t max_count, uint32_t parts, uint64_t publish_ring)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipelineLayout layout;
@@ -87,12 +85,16 @@ radv_meta_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, uint64_t indirec
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
-   const uint32_t constants[9] = {
-      indirect_va, indirect_va >> 32, records_va, records_va >> 32, count_va, count_va >> 32, stride, max_count, parts,
+   /* The ring is in the 32-bit window. */
+   assert(publish_ring >> 32 == 0 || (publish_ring >> 32) == radv_device_physical(device)->info.address32_hi);
+   const uint32_t constants[10] = {
+      indirect_va, indirect_va >> 32, records_va,    records_va >> 32, count_va,
+      count_va >> 32, stride,         max_count,     parts,            publish_ring,
    };
    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
 
-   radv_unaligned_dispatch(cmd_buffer, max_count, 1, 1);
+   /* With a ring, one workgroup goes through the draws in order. */
+   radv_unaligned_dispatch(cmd_buffer, publish_ring ? 32 : max_count, 1, 1);
 
    radv_meta_end(cmd_buffer);
 

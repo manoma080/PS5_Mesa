@@ -285,6 +285,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_ring_tess_offchip_offset_amd:
    case nir_intrinsic_load_ring_mesh_scratch_amd:
    case nir_intrinsic_load_ring_mesh_scratch_offset_amd:
+   case nir_intrinsic_load_ms_publish_ring_amd:
+   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
+   case nir_intrinsic_load_ms_publish_workgroups_amd:
    case nir_intrinsic_load_ring_esgs_amd:
    case nir_intrinsic_load_ring_es2gs_offset_amd:
    case nir_intrinsic_load_ring_task_draw_amd:

@@ -383,7 +383,7 @@ radv_get_image_stride_for_96bit(const struct radv_device *device, const struct r
 }
 
 uint64_t radv_meta_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride,
-                                     uint64_t count_va, uint32_t max_count, uint32_t parts);
+                                     uint64_t count_va, uint32_t max_count, uint32_t parts, uint64_t publish_ring);
 
 void radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
                                        const VkCopyMemoryIndirectInfoKHR *pCopyMemoryIndirectInfo);

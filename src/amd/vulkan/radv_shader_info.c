@@ -1130,7 +1130,8 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
    info->cs.uses_grid_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS) ||
                              (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11 &&
                               !compiler_info->key.mesh_draw_records);
-   if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records && info->cs.uses_grid_size) {
+   if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records &&
+       (info->cs.uses_grid_size || info->ms.prim_parts > 1)) {
       /* A draw's record is found by its draw ID. */
       info->ms.draw_records = true;
       info->vs.needs_draw_id = true;

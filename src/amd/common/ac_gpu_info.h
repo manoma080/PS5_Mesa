@@ -624,6 +624,15 @@ uint32_t ac_gfx103_get_cu_mask_ps(const struct radeon_info *info);
  */
 #define AC_MESH_SCRATCH_ENTRY_BYTES (160 * 1024)
 
+/* The ring a mesh shader exporting its primitives in parts publishes its
+ * outputs in (ac_nir_lower_ngg_options.ms_publish): a header dword per slot,
+ * then the slots, as many as fit, AC_MS_PUBLISH_MAX_SLOTS at most. Zeroed
+ * when created; each draw packet leaves it zeroed.
+ */
+#define AC_MS_PUBLISH_RING_BYTES (16 * 1024 * 1024)
+#define AC_MS_PUBLISH_MAX_SLOTS 256
+#define AC_MS_PUBLISH_HEADER_BYTES (AC_MS_PUBLISH_MAX_SLOTS * 4)
+
 #ifdef __cplusplus
 }
 #endif

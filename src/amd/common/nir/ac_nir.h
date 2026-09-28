@@ -251,11 +251,21 @@ typedef struct {
     * shader gives each primitive vertices of its own, which carry its
     * per-primitive outputs as per-vertex ones, flat. As one NGG subgroup
     * exports 256 vertices at most, a workgroup's primitives go out in
-    * ms_prim_parts parts: the API workgroup runs once per part (hardware
-    * workgroup index = API index * parts + part), its side effects in the
-    * first part only. 0 exports per-primitive parameters.
+    * ms_prim_parts parts (hardware workgroup index = API index * parts +
+    * part). Without ms_publish, the API workgroup runs once per part, its
+    * side effects in the first part only. 0 exports per-primitive parameters.
     */
    unsigned ms_prim_parts;
+   /* With more than one part: the first part runs the API workgroup and
+    * publishes its outputs in a slot of the ring at ms_publish_ring_amd
+    * (AC_MS_PUBLISH_RING_BYTES), which the other parts wait for, export from
+    * and free. Workgroups take slots in launch order, counted from the draw
+    * packet's first (ms_publish_first_workgroup_amd, ms_publish_workgroups_amd),
+    * and wait only for earlier ones, which the hardware launched first. The
+    * packet's last workgroups leave the ring zeroed; the next packet must not
+    * start before they end.
+    */
+   bool ms_publish;
 } ac_nir_lower_ngg_options;
 
 bool

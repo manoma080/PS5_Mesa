@@ -1356,6 +1356,11 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
       radv_bo_destroy(device, NULL, device->zero_bo);
    }
 
+   if (device->ms_publish_ring) {
+      device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, false);
+      radv_bo_destroy(device, NULL, device->ms_publish_ring);
+   }
+
    if (device->gfx_init)
       radv_bo_destroy(device, NULL, device->gfx_init);
 
@@ -1681,6 +1686,22 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          goto fail;
 
       result = device->ws->buffer_make_resident(device->ws, device->zero_bo, true);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Zeroed, as every draw packet leaves it; its address goes in a record's
+    * 32 bits. */
+   if (device->vk.enabled_features.meshShader && radv_mesh_draw_records_enabled(pdev) &&
+       !pdev->info.compiler_info.has_ngg_per_prim_params) {
+      result = radv_bo_create(device, NULL, AC_MS_PUBLISH_RING_BYTES, 4096, RADEON_DOMAIN_VRAM,
+                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM |
+                                 RADEON_FLAG_32BIT,
+                              RADV_BO_PRIORITY_SCRATCH, 0, true, &device->ms_publish_ring);
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      result = device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, true);
       if (result != VK_SUCCESS)
          goto fail;
    }

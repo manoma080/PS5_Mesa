@@ -279,7 +279,10 @@ struct radv_shader_layout {
 /* A mesh shader draw's record when there is no DISPATCH_MESH_INDIRECT_MULTI
  * (radv_mesh_draw_records_enabled): the ordinary draw launching the draw's
  * workgroups (a vertex each, a part each with radv_shader_info.ms.prim_parts),
- * then the workgroup count the shader reads by draw ID.
+ * then the workgroup count the shader reads by draw ID. A shader publishing
+ * its outputs (radv_ms_publishes) also reads the ring's address and the
+ * packet's workgroups from the first record, and the draw's first workgroup
+ * among them from its own.
  */
 struct radv_mesh_draw_record {
    uint32_t vertex_count;
@@ -287,7 +290,9 @@ struct radv_mesh_draw_record {
    uint32_t first_vertex;
    uint32_t first_instance;
    uint32_t grid[3];
-   uint32_t pad;
+   uint32_t publish_ring; /* the low 32 bits: it is in the 32-bit window */
+   uint64_t first_workgroup;
+   uint64_t workgroups;
 };
 
 struct radv_shader_stage {
