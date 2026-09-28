@@ -388,6 +388,10 @@ struct radeon_info {
    /* Whether the CP runs a command buffer the GPU wrote, chained with
     * INDIRECT_BUFFER: device-generated commands need it. */
    bool has_gpu_written_ibs;
+   /* A display that scans out one swizzle mode only, display_swizzle_mode,
+    * without DCC; scanout images are laid out in it. */
+   bool has_fixed_display_swizzle;
+   uint8_t display_swizzle_mode;
    /* Whether performance counters can be programmed with the GPU held at a
     * stable power state: VK_KHR_performance_query needs both. */
    bool has_perf_counters;

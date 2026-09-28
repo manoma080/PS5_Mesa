@@ -1248,6 +1248,12 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
          image->planes[plane].surface.u.gfx9.swizzle_mode = image->planes[0].surface.u.gfx9.swizzle_mode;
       }
 
+      /* Laid out as a display that scans out one layout takes it. */
+      if ((image->planes[plane].surface.flags & RADEON_SURF_SCANOUT) && pdev->info.has_fixed_display_swizzle) {
+         image->planes[plane].surface.flags |= RADEON_SURF_FORCE_SWIZZLE_MODE | RADEON_SURF_DISABLE_DCC;
+         image->planes[plane].surface.u.gfx9.swizzle_mode = pdev->info.display_swizzle_mode;
+      }
+
       radv_surface_init(pdev, &info, &image->planes[plane].surface);
 
       if (plane == 0) {
