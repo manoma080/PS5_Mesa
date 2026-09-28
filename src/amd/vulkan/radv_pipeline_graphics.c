@@ -2513,6 +2513,10 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       radv_gs_compute_split(compiler_info, stages, &gs_compute_nir);
       gs_compute_gfx_state = *gfx_state;
       gs_compute_gfx_state.ia.topology = radv_gs_compute_rast_topology(gs_compute_nir.info.mode);
+      /* The rasterization copy draws points when the geometry shader does,
+       * whatever the application's topology: their size stays. */
+      if (gs_compute_nir.info.mode == MESA_PRIM_POINTS)
+         gs_compute_gfx_state.enable_remove_point_size = false;
       gs_compute_gfx_state.vs.has_prolog = false;
       gfx_state = &gs_compute_gfx_state;
    }
