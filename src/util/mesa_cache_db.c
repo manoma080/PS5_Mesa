@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "crc32.h"
@@ -418,9 +419,18 @@ mesa_db_fopen(const char *path)
    /* The fopen("r+b") mode doesn't auto-create new file, hence we need to
     * explicitly create the file first.
     */
+#if defined(__PROSPERO__)
+   /* A PS5 title's files stay open to the console's FTP service, which runs as
+    * another user: 0666, whatever the umask. */
+   int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0666);
+   if (fd < 0)
+      return NULL;
+   fchmod(fd, 0666);
+#else
    int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0644);
    if (fd < 0)
       return NULL;
+#endif
 
    FILE *f = fdopen(fd, "r+b");
    if (!f)

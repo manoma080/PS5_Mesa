@@ -104,6 +104,19 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 #include "util/ralloc.h"
 #include "util/rand_xor.h"
 
+/* A PS5 title's cache stays open to the console's FTP service, which runs as
+ * another user: folders 0777 and files 0666, whatever the umask. Elsewhere
+ * the cache is the user's own. */
+#if defined(__PROSPERO__)
+#define DISK_CACHE_DIR_MODE 0777
+#define DISK_CACHE_FILE_MODE 0666
+#define disk_cache_share_file(fd) fchmod(fd, DISK_CACHE_FILE_MODE)
+#else
+#define DISK_CACHE_DIR_MODE 0700
+#define DISK_CACHE_FILE_MODE 0644
+#define disk_cache_share_file(fd) ((void)(fd))
+#endif
+
 /* Check if directory exists or if mkdir_if_needed param is set create a
  * directory named 'path' if it does not already exist.
  * This is for use by find_or_create_dir(). Use that instead.
@@ -132,7 +145,11 @@ find_or_mkdir_if_needed(const char *path, bool mkdir_if_needed)
    if (!mkdir_if_needed)
       return -1;
 
-   int ret = mkdir(path, 0700);
+   int ret = mkdir(path, DISK_CACHE_DIR_MODE);
+#if defined(__PROSPERO__)
+   if (ret == 0)
+      chmod(path, DISK_CACHE_DIR_MODE);
+#endif
    if (ret == 0 || (ret == -1 && errno == EEXIST))
      return 0;
 
@@ -784,7 +801,7 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
    if (asprintf(&filename_tmp, "%s.tmp", filename) == -1)
       goto done;
 
-   fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
+   fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, DISK_CACHE_FILE_MODE);
 
    /* Make the two-character subdirectory within the cache as needed. */
    if (fd == -1) {
@@ -793,10 +810,11 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
 
       make_cache_file_directory(dc_job->cache, dc_job->key);
 
-      fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
+      fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, DISK_CACHE_FILE_MODE);
       if (fd == -1)
          goto done;
    }
+   disk_cache_share_file(fd);
 
    /* With the temporary file open, we take an exclusive flock on
     * it. If the flock fails, then another process still has the file
@@ -1091,8 +1109,9 @@ disk_cache_touch_cache_user_marker(char *path)
 
    struct stat attr;
    if (stat(marker_path, &attr) == -1) {
-      int fd = open(marker_path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+      int fd = open(marker_path, O_WRONLY | O_CREAT | O_CLOEXEC, DISK_CACHE_FILE_MODE);
       if (fd != -1) {
+         disk_cache_share_file(fd);
          close(fd);
       }
    } else if (now - attr.st_mtime > 60 * 60 * 24 /* One day */) {
@@ -1111,9 +1130,10 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
    if (path == NULL)
       goto path_fail;
 
-   fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+   fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, DISK_CACHE_FILE_MODE);
    if (fd == -1)
       goto path_fail;
+   disk_cache_share_file(fd);
 
    struct stat sb;
    if (fstat(fd, &sb) == -1)

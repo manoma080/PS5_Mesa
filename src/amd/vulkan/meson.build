@@ -345,7 +345,14 @@ _radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort
 # A PS5 title cannot load a shared library, so the console build is an archive
 # the title links; the host build of the PS5 winsys stays a loadable ICD.
 if with_radv_ps5 and get_option('default_library') == 'static'
-  libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target)
+  # zlib, which the shader cache compresses with, comes from its subproject
+  # for the console and installs as an archive of its own: the title links one.
+  _radv_whole = []
+  if dep_zlib.found() and dep_zlib.type_name() == 'internal'
+    _radv_whole += subproject('zlib').get_variable('zlib')
+  endif
+  libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target,
+                                    link_whole : _radv_whole)
 else
   libvulkan_radeon = shared_library(
     'vulkan_radeon',
