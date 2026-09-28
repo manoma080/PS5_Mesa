@@ -110,12 +110,22 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 #if defined(__PROSPERO__)
 #define DISK_CACHE_DIR_MODE 0777
 #define DISK_CACHE_FILE_MODE 0666
-#define disk_cache_share_file(fd) fchmod(fd, DISK_CACHE_FILE_MODE)
 #else
 #define DISK_CACHE_DIR_MODE 0700
 #define DISK_CACHE_FILE_MODE 0644
-#define disk_cache_share_file(fd) ((void)(fd))
 #endif
+
+/* A change of mode is a metadata write, near a millisecond on the console, so
+ * it is made only when the mode is not already so. */
+static void
+disk_cache_share_file(UNUSED int fd)
+{
+#if defined(__PROSPERO__)
+   struct stat st;
+   if (fstat(fd, &st) == 0 && (st.st_mode & 0777) != DISK_CACHE_FILE_MODE)
+      fchmod(fd, DISK_CACHE_FILE_MODE);
+#endif
+}
 
 /* Check if directory exists or if mkdir_if_needed param is set create a
  * directory named 'path' if it does not already exist.
@@ -147,7 +157,7 @@ find_or_mkdir_if_needed(const char *path, bool mkdir_if_needed)
 
    int ret = mkdir(path, DISK_CACHE_DIR_MODE);
 #if defined(__PROSPERO__)
-   if (ret == 0)
+   if (ret == 0 && stat(path, &sb) == 0 && (sb.st_mode & 0777) != DISK_CACHE_DIR_MODE)
       chmod(path, DISK_CACHE_DIR_MODE);
 #endif
    if (ret == 0 || (ret == -1 && errno == EEXIST))
