@@ -16,6 +16,7 @@
 
 #include "c11/threads.h"
 #include "util/macros.h"
+#include "util/os_time.h"
 #include "util/simple_mtx.h"
 #include "util/u_math.h"
 
@@ -642,22 +643,41 @@ radv_ps5_memory_free(struct radv_ps5_memory *memory)
    *memory = (struct radv_ps5_memory){.physical = -1};
 }
 
+/* Where radv_ps5_submit's time went (radv_ps5_submit_times). */
+static uint64_t radv_ps5_submit_ns[3];
+
 int
 radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value)
 {
    (void)marker;
    (void)marker_value;
+   const uint64_t started = os_time_get_nano();
    radv_ps5_cpu_flush(words, (size_t)count * sizeof(uint32_t));
+   const uint64_t flushed = os_time_get_nano();
    struct ps5_agc_submit_description description = {
       .words = words,
       .word_count = count,
    };
    int32_t result = sceAgcDriverSubmitDcb(&description);
+   const uint64_t submitted = os_time_get_nano();
+   radv_ps5_submit_ns[0] += flushed - started;
+   radv_ps5_submit_ns[1] += submitted - flushed;
    if (result != 0)
       return result;
    /* Without the suspend point the console starts a submission up to a
     * refresh late (PS5_Vulkan R68). */
-   return sceAgcSuspendPoint();
+   result = sceAgcSuspendPoint();
+   radv_ps5_submit_ns[2] += os_time_get_nano() - submitted;
+   return result;
+}
+
+void
+radv_ps5_submit_times(uint64_t times[3])
+{
+   for (unsigned i = 0; i < 3; i++) {
+      times[i] = radv_ps5_submit_ns[i];
+      radv_ps5_submit_ns[i] = 0;
+   }
 }
 
 int
@@ -918,6 +938,12 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
    if (marker)
       *marker = marker_value;
    return 0;
+}
+
+void
+radv_ps5_submit_times(uint64_t times[3])
+{
+   times[0] = times[1] = times[2] = 0;
 }
 
 int

@@ -6,6 +6,7 @@
 
 #include "radv_ps5_winsys.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -500,6 +501,35 @@ radv_ps5_copy_streams(uint32_t *at, struct ac_cmdbuf **streams, unsigned count)
    return at;
 }
 
+/* Where the submissions' time goes: a line on stderr every 10 s of a queue
+ * that submits (held with the submit lock). */
+static struct {
+   uint64_t window_start, count, words, claim_ns, copy_ns;
+} radv_ps5_submit_window;
+
+static void
+radv_ps5_note_submission(uint32_t words, uint64_t claim_ns, uint64_t copy_ns)
+{
+   const uint64_t now = os_time_get_nano();
+   if (!radv_ps5_submit_window.window_start)
+      radv_ps5_submit_window.window_start = now;
+   radv_ps5_submit_window.count++;
+   radv_ps5_submit_window.words += words;
+   radv_ps5_submit_window.claim_ns += claim_ns;
+   radv_ps5_submit_window.copy_ns += copy_ns;
+   if (now - radv_ps5_submit_window.window_start < 10ull * 1000 * 1000 * 1000)
+      return;
+   uint64_t times[3];
+   radv_ps5_submit_times(times);
+   fprintf(stderr,
+           "radv/ps5 submissions: window count=%" PRIu64 " kwords=%" PRIu64 " claim_ms=%.1f copy_ms=%.1f flush_ms=%.1f"
+           " agc_ms=%.1f suspend_ms=%.1f\n",
+           radv_ps5_submit_window.count, radv_ps5_submit_window.words / 1024, radv_ps5_submit_window.claim_ns / 1e6,
+           radv_ps5_submit_window.copy_ns / 1e6, times[0] / 1e6, times[1] / 1e6, times[2] / 1e6);
+   memset(&radv_ps5_submit_window, 0, sizeof(radv_ps5_submit_window));
+   radv_ps5_submit_window.window_start = now;
+}
+
 static VkResult
 radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_submit_info *submit, uint32_t wait_count,
                    const struct vk_sync_wait *waits, uint32_t signal_count, const struct vk_sync_signal *signals)
@@ -594,7 +624,9 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
    }
 
    const uint64_t seq = queue->submitted_seq + 1;
+   const uint64_t claim_start = os_time_get_nano();
    uint32_t *const words = too_large ? NULL : radv_ps5_queue_claim(queue, count, seq);
+   const uint64_t copy_start = os_time_get_nano();
    if (!words) {
       simple_mtx_unlock(&queue->submit_lock);
       util_dynarray_fini(&pieces);
@@ -628,6 +660,7 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
    util_dynarray_fini(&pieces);
    util_dynarray_fini(&units);
 
+   const uint64_t copy_end = os_time_get_nano();
    p_atomic_set(&queue->submitted_seq, seq);
    int submitted = 0;
    const unsigned parts = util_dynarray_num_elements(&starts, uint32_t);
@@ -637,6 +670,7 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
       submitted = radv_ps5_submit(words + start, end - start, queue->marker, (uint32_t)seq);
    }
    util_dynarray_fini(&starts);
+   radv_ps5_note_submission(count, copy_start - claim_start, copy_end - copy_start);
    simple_mtx_unlock(&queue->submit_lock);
    if (submitted != 0) {
       fprintf(stderr, "radv/ps5: sceAgcDriverSubmitDcb failed: 0x%08x\n", (unsigned)submitted);
