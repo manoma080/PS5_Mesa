@@ -102,6 +102,11 @@ void radv_ps5_cpu_flush(const void *address, size_t bytes);
  * been flushed). The words end with a packet that writes marker_value to
  * marker once they have run; the host model writes it at once. */
 int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value);
+
+/* The nanoseconds radv_ps5_submit spent since the last call, in the cache
+ * flush, in sceAgcDriverSubmitDcb and in sceAgcSuspendPoint (called with the
+ * submit lock held, as radv_ps5_submit is). */
+void radv_ps5_submit_times(uint64_t times[3]);
 /* The tessellation factor ring the GPU uses from the next submission on (AGC
  * owns its registers); 0 or the system software's error. */
 int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);
