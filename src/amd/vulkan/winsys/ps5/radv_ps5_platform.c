@@ -179,9 +179,13 @@ radv_ps5_cpu_flush(const void *address, size_t bytes)
    const uintptr_t line = 64;
    uintptr_t at = (uintptr_t)address & ~(line - 1);
    const uintptr_t end = (uintptr_t)address + bytes;
+   /* CLFLUSHOPT (Zen 2 has it): the lines are written back and dropped as
+    * CLFLUSH does, but not one after another; the closing MFENCE orders them
+    * before every later store and load (a submission, or a read of what the
+    * GPU wrote). A submission's words took one serialising CLFLUSH a line. */
    __builtin_ia32_mfence();
    for (; at < end; at += line)
-      __builtin_ia32_clflush((const void *)at);
+      __asm__ volatile("clflushopt %0" : "+m"(*(volatile char *)at));
    __builtin_ia32_mfence();
 }
 
