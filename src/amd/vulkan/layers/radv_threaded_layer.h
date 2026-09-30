@@ -35,6 +35,11 @@ void radv_threaded_note(struct radv_cmd_buffer *cmd_buffer, bool kick_point);
 /* Everything queued on the command buffer is recorded when this returns. */
 void radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer);
 
+/* Every batch handed to the worker so far is recorded when this returns: the
+ * layer's destroys and frees call it first, since a queued command may name
+ * the object (radv_threaded_layer_gen.py). */
+void radv_threaded_barrier(struct radv_device *device);
+
 void radv_threaded_queue_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
                                                VkPipelineLayout layout, uint32_t firstSet,
                                                uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets,

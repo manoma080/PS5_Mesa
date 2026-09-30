@@ -12,12 +12,14 @@
  * RADV). A command buffer is only ever recorded by one thread at a time: the
  * worker while it has batches of it, the application's thread otherwise
  * (vkBeginCommandBuffer, vkEndCommandBuffer, resets and frees, and the few
- * commands the layer records directly, all drain the command buffer first).
+ * commands the layer records directly, all wait for the worker first).
  *
- * What the queue copies is what a command's arguments point to; the objects
- * they name stay the application's to keep alive, which the specification
- * already requires until the command buffer's recording ends, and recording
- * ends only once the worker has recorded everything. */
+ * What the queue copies is what a command's arguments point to, not the
+ * objects they name. The application may destroy one of those while the
+ * command buffer records (the command buffer becomes invalid, and only a
+ * reset, a begin or a free is left to it), so every destroy and free first
+ * waits for the batches handed to the worker before it, and resets, begins
+ * and frees drop what is still queued instead of recording it. */
 
 #include "radv_threaded_layer.h"
 
@@ -50,6 +52,9 @@ struct radv_threaded_recorder {
    cnd_t work;
    cnd_t done;
    struct list_head batches;
+   uint64_t kicked;   /* batches handed over so far */
+   uint64_t recorded; /* of those, the ones recorded (in order: one worker) */
+   uint32_t barriers; /* threads waiting in radv_threaded_barrier */
    uint32_t queued;   /* batches waiting, read without the lock while spinning */
    bool sleeping;     /* the worker waits on work */
    bool stop;
@@ -118,7 +123,8 @@ radv_threaded_worker(void *opaque)
       vk_cmd_queue_execute(&queue, radv_cmd_buffer_to_handle(cmd_buffer), &device->layer_dispatch.threaded);
 
       mtx_lock(&rec->lock);
-      if (p_atomic_dec_zero(&cmd_buffer->threaded.pending))
+      rec->recorded++;
+      if (p_atomic_dec_zero(&cmd_buffer->threaded.pending) || rec->barriers)
          cnd_broadcast(&rec->done);
    }
    mtx_unlock(&rec->lock);
@@ -171,6 +177,8 @@ radv_threaded_device_finish(struct radv_device *device)
    device->threaded = NULL;
 }
 
+static void radv_threaded_wait(struct radv_cmd_buffer *cmd_buffer);
+
 /* Hands what is queued on the command buffer to the worker. */
 static void
 radv_threaded_kick(struct radv_cmd_buffer *cmd_buffer)
@@ -186,7 +194,7 @@ radv_threaded_kick(struct radv_cmd_buffer *cmd_buffer)
    struct radv_threaded_batch *batch = linear_alloc_child(queue->ctx, sizeof(*batch));
    if (!batch) {
       /* Recorded here instead, once the worker is done with it. */
-      radv_threaded_drain(cmd_buffer);
+      radv_threaded_wait(cmd_buffer);
       radv_threaded_on_worker = true;
       vk_cmd_queue_execute(queue, radv_cmd_buffer_to_handle(cmd_buffer), &device->layer_dispatch.threaded);
       radv_threaded_on_worker = false;
@@ -202,6 +210,7 @@ radv_threaded_kick(struct radv_cmd_buffer *cmd_buffer)
 
    mtx_lock(&rec->lock);
    list_addtail(&batch->link, &rec->batches);
+   rec->kicked++;
    p_atomic_inc(&rec->queued);
    if (rec->sleeping)
       cnd_signal(&rec->work);
@@ -216,13 +225,12 @@ radv_threaded_note(struct radv_cmd_buffer *cmd_buffer, bool kick_point)
       radv_threaded_kick(cmd_buffer);
 }
 
-void
-radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer)
+/* Waits for the batches of the command buffer the worker has. */
+static void
+radv_threaded_wait(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_threaded_recorder *rec = device->threaded;
-
-   radv_threaded_kick(cmd_buffer);
 
    if (!p_atomic_read(&cmd_buffer->threaded.pending))
       return;
@@ -233,16 +241,64 @@ radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer)
    mtx_unlock(&rec->lock);
 }
 
-/* Every command buffer of the pool drained (resets and frees of the pool). */
+void
+radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer)
+{
+   radv_threaded_kick(cmd_buffer);
+   radv_threaded_wait(cmd_buffer);
+}
+
+/* For a reset, a begin or a free: what is still queued is dropped (it may
+ * name objects destroyed since, and nothing recorded so far is kept) and
+ * what the worker has is waited for. The queue's memory goes with the reset. */
 static void
-radv_threaded_drain_pool(VkCommandPool commandPool)
+radv_threaded_discard(struct radv_cmd_buffer *cmd_buffer)
+{
+   struct vk_cmd_queue *queue = &cmd_buffer->vk.cmd_queue;
+
+   cmd_buffer->threaded.queued = 0;
+   if (queue->ctx)
+      list_inithead(&queue->cmds);
+   radv_threaded_wait(cmd_buffer);
+}
+
+void
+radv_threaded_barrier(struct radv_device *device)
+{
+   struct radv_threaded_recorder *rec = device->threaded;
+
+   /* The worker itself (a runtime helper destroying its own objects) has
+    * recorded everything before what it records now. */
+   if (!rec || radv_threaded_on_worker)
+      return;
+
+   mtx_lock(&rec->lock);
+   const uint64_t target = rec->kicked;
+   if (rec->recorded < target) {
+      rec->barriers++;
+      while (rec->recorded < target)
+         cnd_wait(&rec->done, &rec->lock);
+      rec->barriers--;
+   }
+   mtx_unlock(&rec->lock);
+}
+
+/* Every command buffer of the pool discarded (resets and frees of the pool)
+ * or only waited for (trims, which leave recording command buffers be). */
+static void
+radv_threaded_pool(VkCommandPool commandPool, bool discard)
 {
    VK_FROM_HANDLE(vk_command_pool, pool, commandPool);
    if (!pool)
       return;
 
-   list_for_each_entry (struct vk_command_buffer, vk_cmd_buffer, &pool->command_buffers, pool_link)
-      radv_threaded_drain(container_of(vk_cmd_buffer, struct radv_cmd_buffer, vk));
+   list_for_each_entry (struct vk_command_buffer, vk_cmd_buffer, &pool->command_buffers, pool_link) {
+      struct radv_cmd_buffer *cmd_buffer = container_of(vk_cmd_buffer, struct radv_cmd_buffer, vk);
+      if (discard)
+         radv_threaded_discard(cmd_buffer);
+      else
+         radv_threaded_wait(cmd_buffer);
+   }
 }
 
 void
@@ -310,7 +366,8 @@ radv_threaded_queue_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLa
    list_addtail(&cmd->cmd_link, &queue->cmds);
 }
 
-/* The command buffer lifecycle: each drains what it would touch first. */
+/* The command buffer lifecycle: an end records what is queued first; a
+ * begin, a reset or a free drops it (radv_threaded_discard). */
 
 VKAPI_ATTR VkResult VKAPI_CALL
 threaded_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBeginInfo *pBeginInfo)
@@ -318,7 +375,7 @@ threaded_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBuffer
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
-   radv_threaded_drain(cmd_buffer);
+   radv_threaded_discard(cmd_buffer);
 
    /* RADV makes its command buffers without the runtime's queue. */
    if (!cmd_buffer->vk.cmd_queue.ctx)
@@ -344,7 +401,7 @@ threaded_ResetCommandBuffer(VkCommandBuffer commandBuffer, VkCommandBufferResetF
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
-   radv_threaded_drain(cmd_buffer);
+   radv_threaded_discard(cmd_buffer);
    return device->layer_dispatch.threaded.ResetCommandBuffer(commandBuffer, flags);
 }
 
@@ -356,7 +413,7 @@ threaded_FreeCommandBuffers(VkDevice _device, VkCommandPool commandPool, uint32_
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
       if (pCommandBuffers[i])
-         radv_threaded_drain(radv_cmd_buffer_from_handle(pCommandBuffers[i]));
+         radv_threaded_discard(radv_cmd_buffer_from_handle(pCommandBuffers[i]));
    }
 
    device->layer_dispatch.threaded.FreeCommandBuffers(_device, commandPool, commandBufferCount, pCommandBuffers);
@@ -367,7 +424,7 @@ threaded_ResetCommandPool(VkDevice _device, VkCommandPool commandPool, VkCommand
 {
    VK_FROM_HANDLE(radv_device, device, _device);
 
-   radv_threaded_drain_pool(commandPool);
+   radv_threaded_pool(commandPool, true);
    return device->layer_dispatch.threaded.ResetCommandPool(_device, commandPool, flags);
 }
 
@@ -376,7 +433,7 @@ threaded_TrimCommandPool(VkDevice _device, VkCommandPool commandPool, VkCommandP
 {
    VK_FROM_HANDLE(radv_device, device, _device);
 
-   radv_threaded_drain_pool(commandPool);
+   radv_threaded_pool(commandPool, false);
    device->layer_dispatch.threaded.TrimCommandPool(_device, commandPool, flags);
 }
 
@@ -385,6 +442,6 @@ threaded_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool, const V
 {
    VK_FROM_HANDLE(radv_device, device, _device);
 
-   radv_threaded_drain_pool(commandPool);
+   radv_threaded_pool(commandPool, true);
    device->layer_dispatch.threaded.DestroyCommandPool(_device, commandPool, pAllocator);
 }
