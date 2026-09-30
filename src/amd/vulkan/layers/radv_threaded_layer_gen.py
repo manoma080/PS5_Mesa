@@ -64,7 +64,7 @@ TEMPLATE = Template(COPYRIGHT + """
 
 #include "radv_cmd_buffer.h"
 #include "radv_entrypoints.h"
-#include "radv_threaded_layer.h"
+#include "layers/radv_threaded_layer.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 
 % for c in commands:
