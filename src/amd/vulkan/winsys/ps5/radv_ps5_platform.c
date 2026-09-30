@@ -18,6 +18,7 @@
 #include "util/macros.h"
 #include "util/os_time.h"
 #include "util/simple_mtx.h"
+#include "util/u_atomic.h"
 #include "util/u_math.h"
 
 #if defined(__PROSPERO__)
@@ -647,8 +648,49 @@ radv_ps5_memory_free(struct radv_ps5_memory *memory)
    *memory = (struct radv_ps5_memory){.physical = -1};
 }
 
-/* Where radv_ps5_submit's time went (radv_ps5_submit_times). */
+/* Where radv_ps5_submit's time went (radv_ps5_submit_times); [2] is the kick
+ * thread's. */
 static uint64_t radv_ps5_submit_ns[3];
+
+/* Without a suspend point after it the console starts a submission up to a
+ * refresh late (PS5_Vulkan R68), and the suspend point took about 0.3 ms a
+ * submission of the submitting thread (RPCS3's renderer: 2,000 of them in
+ * 10 s). A thread of its own makes it instead, as soon as a submission is
+ * made; submissions made while it is at one share the next. */
+static mtx_t radv_ps5_kick_lock;
+static cnd_t radv_ps5_kick_wanted;
+static bool radv_ps5_kick_pending;
+static once_flag radv_ps5_kick_once = ONCE_FLAG_INIT;
+
+static int
+radv_ps5_kick_body(void *unused)
+{
+   (void)unused;
+   mtx_lock(&radv_ps5_kick_lock);
+   for (;;) {
+      while (!radv_ps5_kick_pending)
+         cnd_wait(&radv_ps5_kick_wanted, &radv_ps5_kick_lock);
+      radv_ps5_kick_pending = false;
+      mtx_unlock(&radv_ps5_kick_lock);
+      const uint64_t started = os_time_get_nano();
+      const int32_t result = sceAgcSuspendPoint();
+      p_atomic_add(&radv_ps5_submit_ns[2], os_time_get_nano() - started);
+      if (result != 0)
+         fprintf(stderr, "radv/ps5: sceAgcSuspendPoint failed: 0x%08x\n", (unsigned)result);
+      mtx_lock(&radv_ps5_kick_lock);
+   }
+   return 0;
+}
+
+static void
+radv_ps5_kick_start(void)
+{
+   mtx_init(&radv_ps5_kick_lock, mtx_plain);
+   cnd_init(&radv_ps5_kick_wanted);
+   thrd_t thread;
+   if (thrd_create(&thread, radv_ps5_kick_body, NULL) == thrd_success)
+      thrd_detach(thread);
+}
 
 int
 radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value)
@@ -668,20 +710,19 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
    radv_ps5_submit_ns[1] += submitted - flushed;
    if (result != 0)
       return result;
-   /* Without the suspend point the console starts a submission up to a
-    * refresh late (PS5_Vulkan R68). */
-   result = sceAgcSuspendPoint();
-   radv_ps5_submit_ns[2] += os_time_get_nano() - submitted;
-   return result;
+   call_once(&radv_ps5_kick_once, radv_ps5_kick_start);
+   mtx_lock(&radv_ps5_kick_lock);
+   radv_ps5_kick_pending = true;
+   cnd_signal(&radv_ps5_kick_wanted);
+   mtx_unlock(&radv_ps5_kick_lock);
+   return 0;
 }
 
 void
 radv_ps5_submit_times(uint64_t times[3])
 {
-   for (unsigned i = 0; i < 3; i++) {
-      times[i] = radv_ps5_submit_ns[i];
-      radv_ps5_submit_ns[i] = 0;
-   }
+   for (unsigned i = 0; i < 3; i++)
+      times[i] = p_atomic_xchg(&radv_ps5_submit_ns[i], 0);
 }
 
 int
