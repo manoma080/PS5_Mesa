@@ -17,6 +17,7 @@
 #endif
 
 #include "layers/radv_app_workarounds.h"
+#include "layers/radv_threaded_layer.h"
 #include "meta/radv_meta.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
@@ -806,6 +807,7 @@ init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pd
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct dispatch_table_builder b = {0};
    b.tables[RADV_DEVICE_DISPATCH_TABLE] = &device->vk.dispatch_table;
+   b.tables[RADV_THREADED_DISPATCH_TABLE] = &device->layer_dispatch.threaded;
    b.tables[RADV_ANNOTATE_DISPATCH_TABLE] = &device->layer_dispatch.annotate;
    b.tables[RADV_APP_DISPATCH_TABLE] = &device->layer_dispatch.app;
    b.tables[RADV_RGP_DISPATCH_TABLE] = &device->layer_dispatch.rgp;
@@ -813,6 +815,9 @@ init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pd
    b.tables[RADV_RMV_DISPATCH_TABLE] = &device->layer_dispatch.rmv;
    b.tables[RADV_UTRACE_DISPATCH_TABLE] = &device->layer_dispatch.utrace;
    b.tables[RADV_CTX_ROLL_DISPATCH_TABLE] = &device->layer_dispatch.ctx_roll;
+
+   if (device->threaded)
+      add_entrypoints(&b, &threaded_device_entrypoints, RADV_THREADED_DISPATCH_TABLE);
 
    bool gather_ctx_rolls = instance->vk.trace_mode & RADV_TRACE_MODE_CTX_ROLLS;
    if (radv_device_fault_detection_enabled(device) || gather_ctx_rolls)
@@ -1349,6 +1354,7 @@ radv_create_winsys(struct radv_device *device)
 static void
 radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAllocator)
 {
+   radv_threaded_device_finish(device);
    radv_device_finish_utrace(device);
    radv_device_finish_perf_counter(device);
 
@@ -1472,6 +1478,13 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    result = radv_device_init_utrace(device);
    if (result != VK_SUCCESS)
       goto fail;
+
+   /* Threaded recording's worker first: the dispatch tables depend on it. */
+   if (radv_threaded_recording_enabled()) {
+      result = radv_threaded_device_init(device);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
 
    init_dispatch_tables(device, pdev);
 

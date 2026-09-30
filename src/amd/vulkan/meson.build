@@ -40,6 +40,9 @@ radv_entrypoints_gen_command += [
 
   # Command buffer annotation layer entrypoints
   '--device-prefix', 'annotate',
+
+  # Threaded recording layer entrypoints
+  '--device-prefix', 'threaded',
 ]
 
 radv_entrypoints = custom_target(
@@ -70,6 +73,8 @@ libradv_files = files(
   'layers/radv_rmv_layer.c',
   'layers/radv_rra_layer.c',
   'layers/radv_sqtt_layer.c',
+  'layers/radv_threaded_layer.c',
+  'layers/radv_threaded_layer.h',
   'layers/radv_utrace_layer.c',
   'meta/radv_meta.c',
   'meta/radv_meta.h',
@@ -340,7 +345,7 @@ _radv_target = {
   'gnu_symbol_visibility' : 'hidden',
   'install' : true,
 }
-_radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer]
+_radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer, radv_threaded_layer]
 
 # A PS5 title cannot load a shared library, so the console build is an archive
 # the title links; the host build of the PS5 winsys stays a loadable ICD.

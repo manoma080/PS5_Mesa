@@ -38,6 +38,9 @@ struct radv_cmd_stream;
 
 enum radv_dispatch_table {
    RADV_DEVICE_DISPATCH_TABLE,
+   /* Outermost: threaded recording queues the application's commands before
+    * any other layer sees them (its worker then records through the rest). */
+   RADV_THREADED_DISPATCH_TABLE,
    RADV_ANNOTATE_DISPATCH_TABLE,
    RADV_APP_DISPATCH_TABLE,
    RADV_RGP_DISPATCH_TABLE,
@@ -49,6 +52,7 @@ enum radv_dispatch_table {
 };
 
 struct radv_layer_dispatch_tables {
+   struct vk_device_dispatch_table threaded;
    struct vk_device_dispatch_table annotate;
    struct vk_device_dispatch_table app;
    struct vk_device_dispatch_table rgp;
@@ -261,6 +265,9 @@ struct radv_device {
 
    FILE *ctx_roll_file;
    simple_mtx_t ctx_roll_mtx;
+
+   /* Threaded recording's worker (layers/radv_threaded_layer.c), or NULL. */
+   struct radv_threaded_recorder *threaded;
 
    /* Trap handler. */
    struct radv_shader *trap_handler_shader;

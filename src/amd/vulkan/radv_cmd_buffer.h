@@ -547,6 +547,13 @@ struct radv_cmd_buffer_queue_state {
 struct radv_cmd_buffer {
    struct vk_command_buffer vk;
 
+   /* Threaded recording (layers/radv_threaded_layer.c): commands queued since
+    * the last hand-over, and batches the worker has yet to record. */
+   struct {
+      uint32_t queued;
+      uint32_t pending;
+   } threaded;
+
    struct {
       struct u_trace *trace;
       uint32_t last_cdw;
