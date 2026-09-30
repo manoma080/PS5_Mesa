@@ -1479,15 +1479,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* Threaded recording's worker first: the dispatch tables depend on it. */
-   if (radv_threaded_recording_enabled()) {
-      result = radv_threaded_device_init(device);
-      if (result != VK_SUCCESS)
-         goto fail;
-   }
-
-   init_dispatch_tables(device, pdev);
-
    /* Initialize everything required for compilation, first. */
 
    simple_mtx_init(&device->ctx_roll_mtx, mtx_plain);
@@ -1500,6 +1491,16 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    device->rt_handles = _mesa_hash_table_create(NULL, _mesa_hash_u32, _mesa_key_u32_equal);
 
    radv_init_shader_arenas(device);
+
+   /* Threaded recording's worker before the dispatch tables, which depend on
+    * it; after what radv_destroy_device takes apart when it fails. */
+   if (radv_threaded_recording_enabled()) {
+      result = radv_threaded_device_init(device);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   init_dispatch_tables(device, pdev);
 
    if (!device->vk.disable_internal_cache) {
       result = radv_device_init_memory_cache(device);
