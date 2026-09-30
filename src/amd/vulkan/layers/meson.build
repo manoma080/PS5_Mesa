@@ -12,3 +12,15 @@ radv_annotate_layer = custom_target(
   ],
   depend_files : [files('radv_annotate_layer_gen.py'), vk_dispatch_table_gen_depend_files],
 )
+
+radv_threaded_layer = custom_target(
+  'radv_threaded',
+  input : [files('radv_threaded_layer_gen.py'), vk_api_xml],
+  output : ['radv_threaded_layer_cmds.c'],
+  command : [
+    prog_python, '@INPUT0@', '--xml', '@INPUT1@',
+    '--out-c', '@OUTPUT0@',
+    '--beta', with_vulkan_beta.to_string(),
+  ],
+  depend_files : [files('radv_threaded_layer_gen.py'), vk_dispatch_table_gen_depend_files, vk_cmd_queue_gen_depend_files],
+)
