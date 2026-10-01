@@ -66,8 +66,10 @@
  * went on refreshing at 60 Hz, as a tester's did (PS5_Vulkan, R31). */
 #define VIDEOOUT_HIGH_REFRESH_LIMIT_NS UINT64_C(12500000)
 #define VIDEOOUT_PERIOD_INTERVALS 6
-/* param.json's attribute3 bits for high-frame-rate output (PS5_Vulkan R31). */
-#define VIDEOOUT_ATTRIBUTE3_HIGH_FRAME_RATE 0x80040u
+/* param.json's attribute3 bit for 120 Hz output. PS5_Vulkan R31/R92 declared it with 0x80000
+ * (a 120 Hz mode that requires VRR), which turns the system's VRR off; retail titles with VRR
+ * declare 0x40 with 0x40000. VideoOut itself grants mode 15 or refuses it. */
+#define VIDEOOUT_ATTRIBUTE3_HIGH_FRAME_RATE 0x40u
 
 #if !defined(__PROSPERO__)
 /* The host model: flips show at once and a vblank comes every millisecond,
