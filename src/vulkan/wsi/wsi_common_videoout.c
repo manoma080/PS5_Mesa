@@ -21,7 +21,9 @@
  * screen keeps its last frame in between.
  *
  * A present waits for the frame on a thread and flips it with
- * sceVideoOutSubmitFlip at the next vblank; FIFO is the only present mode. An
+ * sceVideoOutSubmitFlip at the next vblank; FIFO is the only present mode. A
+ * title may ask VideoOut to show each flip for at least two or three vblanks
+ * (wsi_videoout_set_flip_rate): at 119.88 Hz, three paces 40 fps evenly. An
  * acquire takes a buffer that is neither on screen, nor waiting for its flip
  * to show, nor held by an application, the one flipped longest ago, and waits
  * for a flip or a vblank when none is.
@@ -228,6 +230,9 @@ static struct wsi_videoout_output videoout_output = {
    .handle = -1,
 };
 static once_flag videoout_once = ONCE_FLAG_INIT;
+/* sceVideoOutSetFlipRate's rate for the output: a flip shows for at least
+ * rate + 1 vblanks. Under the output's lock. */
+static int videoout_flip_rate;
 
 static void
 videoout_output_init_once(void)
@@ -332,6 +337,27 @@ videoout_open_locked(void)
    return true;
 }
 
+PUBLIC int wsi_videoout_set_flip_rate(int rate);
+
+/* Frame pacing for the title: each flip shows for at least rate + 1 vblanks
+ * (0 every vblank, 1 every second, 2 every third), on the open output at once
+ * and on one opened later. Returns VideoOut's answer, 0 before the output is
+ * open, -1 for a rate it does not take. */
+PUBLIC int
+wsi_videoout_set_flip_rate(int rate)
+{
+   if (rate < 0 || rate > 2)
+      return -1;
+   call_once(&videoout_once, videoout_output_init_once);
+   mtx_lock(&videoout_output.lock);
+   videoout_flip_rate = rate;
+   const int result = videoout_output.handle >= 0 && videoout_output.buffers != NULL
+                         ? sceVideoOutSetFlipRate(videoout_output.handle, rate)
+                         : 0;
+   mtx_unlock(&videoout_output.lock);
+   return result;
+}
+
 static void
 videoout_settle_modes(void)
 {
@@ -381,7 +407,7 @@ videoout_register_locked(void)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 #endif
 
-   int result = sceVideoOutSetFlipRate(out->handle, 0);
+   int result = sceVideoOutSetFlipRate(out->handle, videoout_flip_rate);
    struct ps5_video_out_buffer registered[VIDEOOUT_BUFFERS];
    for (uint32_t i = 0; i < VIDEOOUT_BUFFERS; i++)
       registered[i] = (struct ps5_video_out_buffer){.data = buffers + i * VIDEOOUT_BUFFER_BYTES};
