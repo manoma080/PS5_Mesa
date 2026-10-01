@@ -255,10 +255,13 @@ struct wsi_videoout {
 
 /* --- VideoOut ------------------------------------------------------------ */
 
+/* The title's param.json: /app0's, or the one PS5_VIDEOOUT_PARAM_JSON names, for a title
+ * without /app0 (an elevated process does not see it). */
 static bool
 videoout_title_declares_high_frame_rate(void)
 {
-   FILE *const file = fopen("/app0/sce_sys/param.json", "rb");
+   const char *const path = getenv("PS5_VIDEOOUT_PARAM_JSON");
+   FILE *const file = fopen(path != NULL && path[0] != '\0' ? path : "/app0/sce_sys/param.json", "rb");
    if (file == NULL)
       return false;
    char text[16384];
