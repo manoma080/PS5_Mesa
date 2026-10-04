@@ -8,13 +8,24 @@
  * VK_KHR_display on the PlayStation 5's one display, VideoOut, in place of
  * the DRM backend (wsi_common_display.c), which the console does not have.
  *
- * The display has one plane and one 3840x2160 mode at 59.94 Hz, and a 119.88
- * Hz mode first where the title's metadata declares high-frame-rate output
+ * The display has one plane and a mode at 59.94 Hz for each size it takes
+ * buffers of, 3840x2160, 2560x1440 and 1920x1080, each after a 119.88 Hz mode
+ * of the same size where the title's metadata declares high-frame-rate output
  * and the display refreshes at it (measured, as PS5_Vulkan's ps5vk measured
- * both). VideoOut's framebuffers are the process's: five 32 MiB buffers of
- * direct memory registered once, in the 64 KiB R_X tiles VideoOut scans out
- * (ps5platform/videoout.h). A swapchain takes the first of them as its
- * images, imported into its device as host memory
+ * both). VideoOut scales a buffer of each size to fill what the screen takes
+ * (measured on a 1080p screen, as ps5-opengl's buffers of those sizes also
+ * show). The largest size comes first, so an application that takes the first
+ * mode, or the largest, presents at 3840x2160 as before.
+ *
+ * VideoOut's framebuffers are the process's: for each size a swapchain has
+ * used, a set of five buffers of direct memory, registered the first time and
+ * kept, in the 64 KiB R_X tiles VideoOut scans out (ps5platform/videoout.h).
+ * A set is never unregistered, since VideoOut refuses that (busy) while one of
+ * its buffers is on screen; each has its own buffer indices, and a flip
+ * names the buffer of whichever set it is in. Three sets use buffers 0-14:
+ * VideoOut refused a fourth set's buffers 15-19 (0x80290001), and presents
+ * after that refusal flickered, so no size is added without making room. A swapchain takes the first of
+ * its size's buffers as its images, imported into its device as host memory
  * (VK_EXT_external_memory_host) and laid out as the display takes them (the
  * device's display swizzle, radeon_info), so a device made again, as
  * RetroArch makes one for each core, presents where the last one did and the
@@ -54,11 +65,8 @@
 #include <sys/mman.h>
 #endif
 
-#define VIDEOOUT_WIDTH 3840
-#define VIDEOOUT_HEIGHT 2160
+/* Buffers in each size's set. */
 #define VIDEOOUT_BUFFERS 5
-/* A 3840x2160 four-byte image in 64 KiB tiles is 30x17 tiles, 31.9 MiB. */
-#define VIDEOOUT_BUFFER_BYTES (UINT64_C(32) << 20)
 #define VIDEOOUT_BUFFER_ALIGNMENT (UINT64_C(2) << 20)
 #define VIDEOOUT_REFRESH_MILLIHERTZ 59940
 #define VIDEOOUT_HIGH_REFRESH_MILLIHERTZ 119880
@@ -152,8 +160,30 @@ sceVideoOutConfigureOutput(int32_t handle, uint32_t mode, const void *a, const v
 }
 #endif
 
+/* The sizes VideoOut takes buffers of, the largest first, and a buffer's
+ * bytes: a four-byte image in 64 KiB tiles of 128x128 pixels, rounded up to
+ * the buffers' alignment. 3840x2160 is 30x17 tiles, 31.9 MiB, in 32 MiB. */
+#define VIDEOOUT_TILED_BYTES(width, height)                                                                      \
+   ALIGN_POT(UINT64_C(4) * ALIGN_POT((uint64_t)(width), 128) * ALIGN_POT((uint64_t)(height), 128),          \
+             VIDEOOUT_BUFFER_ALIGNMENT)
+
+struct wsi_videoout_size {
+   VkExtent2D extent;
+   uint64_t buffer_bytes;
+};
+
+#define VIDEOOUT_SIZE(width, height) {.extent = {width, height}, .buffer_bytes = VIDEOOUT_TILED_BYTES(width, height)}
+
+static const struct wsi_videoout_size videoout_sizes[] = {
+   VIDEOOUT_SIZE(3840, 2160),
+   VIDEOOUT_SIZE(2560, 1440),
+   VIDEOOUT_SIZE(1920, 1080),
+};
+#define VIDEOOUT_SIZES ARRAY_SIZE(videoout_sizes)
+
 /* The display and its modes: one each per process, as VideoOut is. */
 struct wsi_videoout_mode {
+   const struct wsi_videoout_size *size;
    uint32_t refresh_millihertz;
    bool high_frame_rate;
 };
@@ -163,10 +193,19 @@ struct wsi_videoout_display {
 };
 
 static struct wsi_videoout_display videoout_display;
-static struct wsi_videoout_mode videoout_mode = {.refresh_millihertz = VIDEOOUT_REFRESH_MILLIHERTZ};
-static struct wsi_videoout_mode videoout_high_mode = {
-   .refresh_millihertz = VIDEOOUT_HIGH_REFRESH_MILLIHERTZ,
-   .high_frame_rate = true,
+
+#define VIDEOOUT_SIZE_MODES(index)                                                                               \
+   {                                                                                                             \
+      {.size = &videoout_sizes[index], .refresh_millihertz = VIDEOOUT_HIGH_REFRESH_MILLIHERTZ,                    \
+       .high_frame_rate = true},                                                                                 \
+      {.size = &videoout_sizes[index], .refresh_millihertz = VIDEOOUT_REFRESH_MILLIHERTZ},                        \
+   }
+
+/* For each size, its 119.88 Hz mode and its 59.94 Hz mode. */
+static struct wsi_videoout_mode videoout_size_modes[VIDEOOUT_SIZES][2] = {
+   VIDEOOUT_SIZE_MODES(0),
+   VIDEOOUT_SIZE_MODES(1),
+   VIDEOOUT_SIZE_MODES(2),
 };
 
 static VkDisplayKHR
@@ -187,7 +226,16 @@ videoout_mode_from_handle(VkDisplayModeKHR mode)
    return (struct wsi_videoout_mode *)(uintptr_t)mode;
 }
 
-static const VkExtent2D videoout_extent = {VIDEOOUT_WIDTH, VIDEOOUT_HEIGHT};
+/* The largest size: the display's resolution as reported. */
+static const VkExtent2D videoout_extent = {3840, 2160};
+
+/* The size of the mode a display surface was made with. */
+static const struct wsi_videoout_size *
+videoout_surface_size(const VkIcdSurfaceBase *icd_surface)
+{
+   const VkIcdSurfaceDisplay *surface = (const VkIcdSurfaceDisplay *)icd_surface;
+   return videoout_mode_from_handle(surface->displayMode)->size;
+}
 
 struct wsi_videoout_swapchain;
 
@@ -207,7 +255,13 @@ struct wsi_videoout_output {
    bool high_frame_rate;
    bool modes_settled;
    bool high_mode_offered;
-   uint8_t *buffers;
+   /* A set of buffers for each size a swapchain has used, in the order they
+    * were registered; set i's buffers are indices i * VIDEOOUT_BUFFERS on. */
+   struct wsi_videoout_set {
+      const struct wsi_videoout_size *size;
+      uint8_t *buffers;
+   } sets[VIDEOOUT_SIZES];
+   uint32_t set_count;
    /* The argument of the latest flip submitted; each flip's is one more. */
    int64_t flip_argument;
    struct {
@@ -217,7 +271,7 @@ struct wsi_videoout_output {
       bool held;
       /* Presented, its flip waiting for the frame. */
       bool pending;
-   } buffer[VIDEOOUT_BUFFERS];
+   } buffer[VIDEOOUT_BUFFERS * VIDEOOUT_SIZES];
    /* The swapchain presenting now; older ones are retired. */
    struct wsi_videoout_swapchain *current;
 
@@ -245,6 +299,9 @@ videoout_output_init_once(void)
 
 struct wsi_videoout_swapchain {
    struct wsi_swapchain base;
+   /* Its size's buffers: image i is buffer first + i. */
+   const struct wsi_videoout_set *set;
+   uint32_t first;
    bool retired;
    /* Presents queued and not yet flipped. */
    uint32_t in_flight;
@@ -356,7 +413,7 @@ wsi_videoout_set_flip_rate(int rate)
    call_once(&videoout_once, videoout_output_init_once);
    mtx_lock(&videoout_output.lock);
    videoout_flip_rate = rate;
-   const int result = videoout_output.handle >= 0 && videoout_output.buffers != NULL
+   const int result = videoout_output.handle >= 0 && videoout_output.set_count != 0
                          ? sceVideoOutSetFlipRate(videoout_output.handle, rate)
                          : 0;
    mtx_unlock(&videoout_output.lock);
@@ -375,17 +432,23 @@ videoout_settle_modes(void)
    mtx_unlock(&videoout_output.lock);
 }
 
-/* The framebuffers, cleared and registered once per process. Under lock. */
+/* The set of buffers of a size, cleared and registered the first time a
+ * swapchain of that size is made, and kept. Under lock. */
 static VkResult
-videoout_register_locked(void)
+videoout_register_locked(const struct wsi_videoout_size *size, const struct wsi_videoout_set **set_out)
 {
    struct wsi_videoout_output *out = &videoout_output;
-   if (out->buffers)
-      return VK_SUCCESS;
+   for (uint32_t i = 0; i < out->set_count; i++) {
+      if (out->sets[i].size == size) {
+         *set_out = &out->sets[i];
+         return VK_SUCCESS;
+      }
+   }
    if (!videoout_open_locked())
       return VK_ERROR_INITIALIZATION_FAILED;
 
-   const size_t bytes = VIDEOOUT_BUFFERS * VIDEOOUT_BUFFER_BYTES;
+   const uint32_t index = out->set_count;
+   const size_t bytes = VIDEOOUT_BUFFERS * size->buffer_bytes;
    uint8_t *buffers = NULL;
 #if defined(__PROSPERO__)
    int64_t physical = -1;
@@ -412,21 +475,27 @@ videoout_register_locked(void)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 #endif
 
-   int result = sceVideoOutSetFlipRate(out->handle, videoout_flip_rate);
+   int result = index == 0 ? sceVideoOutSetFlipRate(out->handle, videoout_flip_rate) : 0;
    struct ps5_video_out_buffer registered[VIDEOOUT_BUFFERS];
    for (uint32_t i = 0; i < VIDEOOUT_BUFFERS; i++)
-      registered[i] = (struct ps5_video_out_buffer){.data = buffers + i * VIDEOOUT_BUFFER_BYTES};
+      registered[i] = (struct ps5_video_out_buffer){.data = buffers + i * size->buffer_bytes};
    uint8_t attribute[PS5_VIDEO_OUT_ATTRIBUTE_BYTES] = {0};
    sceVideoOutSetBufferAttribute2(attribute, PS5_VIDEO_OUT_PIXEL_FORMAT_B8G8R8A8_SDR,
-                                  PS5_VIDEO_OUT_TILING_64KB_R_X, VIDEOOUT_WIDTH, VIDEOOUT_HEIGHT, 0, 0, 0);
+                                  PS5_VIDEO_OUT_TILING_64KB_R_X, size->extent.width, size->extent.height, 0, 0, 0);
    if (result == 0)
-      result = sceVideoOutRegisterBuffers2(out->handle, 0, 0, registered, VIDEOOUT_BUFFERS, attribute, 0, NULL);
+      result = sceVideoOutRegisterBuffers2(out->handle, (int32_t)index, (int32_t)(index * VIDEOOUT_BUFFERS),
+                                           registered, VIDEOOUT_BUFFERS, attribute, 0, NULL);
    if (result != 0) {
-      fprintf(stderr, "wsi/videoout: the framebuffers were not registered: 0x%08x\n", (unsigned)result);
+      fprintf(stderr, "wsi/videoout: the %ux%u framebuffers were not registered as set %u: 0x%08x\n",
+              size->extent.width, size->extent.height, index, (unsigned)result);
       /* The memory stays: VideoOut may hold a buffer it was given. */
       return VK_ERROR_INITIALIZATION_FAILED;
    }
-   out->buffers = buffers;
+   fprintf(stderr, "wsi/videoout: %ux%u framebuffers registered as set %u, buffers %u-%u\n", size->extent.width,
+           size->extent.height, index, index * VIDEOOUT_BUFFERS, index * VIDEOOUT_BUFFERS + VIDEOOUT_BUFFERS - 1);
+   out->sets[index] = (struct wsi_videoout_set){.size = size, .buffers = buffers};
+   out->set_count = index + 1;
+   *set_out = &out->sets[index];
    return VK_SUCCESS;
 }
 
@@ -551,16 +620,19 @@ wsi_GetDisplayPlaneSupportedDisplaysKHR(VkPhysicalDevice physicalDevice, uint32_
    return vk_outarray_status(&out);
 }
 
-/* The fastest mode first: an application taking the first mode gets 119.88
- * Hz where it is offered. */
+/* The largest size first, and each size's fastest mode first: an
+ * application taking the first mode gets 3840x2160, at 119.88 Hz where it is
+ * offered. */
 static uint32_t
-videoout_modes(struct wsi_videoout_mode *modes[2])
+videoout_modes(struct wsi_videoout_mode *modes[VIDEOOUT_SIZES * 2])
 {
    videoout_settle_modes();
    uint32_t count = 0;
-   if (videoout_output.high_mode_offered)
-      modes[count++] = &videoout_high_mode;
-   modes[count++] = &videoout_mode;
+   for (uint32_t i = 0; i < VIDEOOUT_SIZES; i++) {
+      if (videoout_output.high_mode_offered)
+         modes[count++] = &videoout_size_modes[i][0];
+      modes[count++] = &videoout_size_modes[i][1];
+   }
    return count;
 }
 
@@ -568,7 +640,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 wsi_GetDisplayModePropertiesKHR(VkPhysicalDevice physicalDevice, VkDisplayKHR display, uint32_t *pPropertyCount,
                                 VkDisplayModePropertiesKHR *pProperties)
 {
-   struct wsi_videoout_mode *modes[2];
+   struct wsi_videoout_mode *modes[VIDEOOUT_SIZES * 2];
    const uint32_t mode_count = videoout_modes(modes);
    VK_OUTARRAY_MAKE_TYPED(VkDisplayModePropertiesKHR, out, pProperties, pPropertyCount);
    for (uint32_t i = 0; i < mode_count; i++) {
@@ -576,7 +648,7 @@ wsi_GetDisplayModePropertiesKHR(VkPhysicalDevice physicalDevice, VkDisplayKHR di
       {
          *prop = (VkDisplayModePropertiesKHR){
             .displayMode = videoout_mode_handle(modes[i]),
-            .parameters = {.visibleRegion = videoout_extent, .refreshRate = modes[i]->refresh_millihertz},
+            .parameters = {.visibleRegion = modes[i]->size->extent, .refreshRate = modes[i]->refresh_millihertz},
          };
       }
    }
@@ -587,7 +659,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 wsi_GetDisplayModeProperties2KHR(VkPhysicalDevice physicalDevice, VkDisplayKHR display, uint32_t *pPropertyCount,
                                  VkDisplayModeProperties2KHR *pProperties)
 {
-   struct wsi_videoout_mode *modes[2];
+   struct wsi_videoout_mode *modes[VIDEOOUT_SIZES * 2];
    const uint32_t mode_count = videoout_modes(modes);
    VK_OUTARRAY_MAKE_TYPED(VkDisplayModeProperties2KHR, out, pProperties, pPropertyCount);
    for (uint32_t i = 0; i < mode_count; i++) {
@@ -595,7 +667,7 @@ wsi_GetDisplayModeProperties2KHR(VkPhysicalDevice physicalDevice, VkDisplayKHR d
       {
          prop->displayModeProperties = (VkDisplayModePropertiesKHR){
             .displayMode = videoout_mode_handle(modes[i]),
-            .parameters = {.visibleRegion = videoout_extent, .refreshRate = modes[i]->refresh_millihertz},
+            .parameters = {.visibleRegion = modes[i]->size->extent, .refreshRate = modes[i]->refresh_millihertz},
          };
       }
    }
@@ -609,12 +681,12 @@ wsi_CreateDisplayModeKHR(VkPhysicalDevice physicalDevice, VkDisplayKHR display,
 {
    /* VideoOut's modes are the ones reported and it makes no others: one
     * asked for with a reported mode's parameters is that mode. */
-   struct wsi_videoout_mode *modes[2];
+   struct wsi_videoout_mode *modes[VIDEOOUT_SIZES * 2];
    const uint32_t mode_count = videoout_modes(modes);
    const VkDisplayModeParametersKHR *parameters = &pCreateInfo->parameters;
    for (uint32_t i = 0; i < mode_count; i++) {
-      if (parameters->visibleRegion.width == videoout_extent.width &&
-          parameters->visibleRegion.height == videoout_extent.height &&
+      if (parameters->visibleRegion.width == modes[i]->size->extent.width &&
+          parameters->visibleRegion.height == modes[i]->size->extent.height &&
           parameters->refreshRate == modes[i]->refresh_millihertz) {
          *pMode = videoout_mode_handle(modes[i]);
          return VK_SUCCESS;
@@ -627,16 +699,18 @@ VKAPI_ATTR VkResult VKAPI_CALL
 wsi_GetDisplayPlaneCapabilitiesKHR(VkPhysicalDevice physicalDevice, VkDisplayModeKHR mode, uint32_t planeIndex,
                                    VkDisplayPlaneCapabilitiesKHR *pCapabilities)
 {
+   /* A mode's buffers fill the screen: source and destination are its size. */
+   const VkExtent2D extent = videoout_mode_from_handle(mode)->size->extent;
    *pCapabilities = (VkDisplayPlaneCapabilitiesKHR){
       .supportedAlpha = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR,
       .minSrcPosition = {0, 0},
       .maxSrcPosition = {0, 0},
-      .minSrcExtent = videoout_extent,
-      .maxSrcExtent = videoout_extent,
+      .minSrcExtent = extent,
+      .maxSrcExtent = extent,
       .minDstPosition = {0, 0},
       .maxDstPosition = {0, 0},
-      .minDstExtent = videoout_extent,
-      .maxDstExtent = videoout_extent,
+      .minDstExtent = extent,
+      .maxDstExtent = extent,
    };
    return VK_SUCCESS;
 }
@@ -694,11 +768,12 @@ videoout_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface, struct wsi_dev
    VkSurfaceCapabilitiesKHR *const c = &caps->surfaceCapabilities;
    const VkSurfacePresentModeKHR *present_mode = vk_find_struct_const(info_next, SURFACE_PRESENT_MODE_KHR);
 
+   const VkExtent2D extent = videoout_surface_size(icd_surface)->extent;
    c->minImageCount = 2;
    c->maxImageCount = VIDEOOUT_BUFFERS;
-   c->currentExtent = videoout_extent;
-   c->minImageExtent = videoout_extent;
-   c->maxImageExtent = videoout_extent;
+   c->currentExtent = extent;
+   c->minImageExtent = extent;
+   c->maxImageExtent = extent;
    c->maxImageArrayLayers = 1;
    c->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
    c->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -800,7 +875,7 @@ videoout_surface_get_present_rectangles(VkIcdSurfaceBase *surface, struct wsi_de
 {
    VK_OUTARRAY_MAKE_TYPED(VkRect2D, out, pRects, pRectCount);
    vk_outarray_append_typed(VkRect2D, &out, rect)
-      *rect = (VkRect2D){.offset = {0, 0}, .extent = videoout_extent};
+      *rect = (VkRect2D){.offset = {0, 0}, .extent = videoout_surface_size(surface)->extent};
    return vk_outarray_status(&out);
 }
 
@@ -814,12 +889,19 @@ videoout_create_image_mem(const struct wsi_swapchain *wsi_chain, const struct ws
    const struct wsi_videoout_swapchain *chain = (const struct wsi_videoout_swapchain *)wsi_chain;
    const struct wsi_device *wsi = wsi_chain->wsi;
    const uint32_t index = image - chain->images;
-   void *const pointer = videoout_output.buffers + index * VIDEOOUT_BUFFER_BYTES;
+   const uint64_t buffer_bytes = chain->set->size->buffer_bytes;
+   void *const pointer = chain->set->buffers + index * buffer_bytes;
 
    VkMemoryRequirements reqs;
    wsi->GetImageMemoryRequirements(wsi_chain->device, image->image, &reqs);
-   if (reqs.size > VIDEOOUT_BUFFER_BYTES || reqs.alignment > VIDEOOUT_BUFFER_ALIGNMENT)
+   if (reqs.size > buffer_bytes || reqs.alignment > VIDEOOUT_BUFFER_ALIGNMENT) {
+      fprintf(stderr,
+              "wsi/videoout: a %ux%u image needs %" PRIu64 " bytes aligned to %" PRIu64
+              "; its buffer has %" PRIu64 "\n",
+              chain->set->size->extent.width, chain->set->size->extent.height, (uint64_t)reqs.size,
+              (uint64_t)reqs.alignment, buffer_bytes);
       return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
    VkMemoryHostPointerPropertiesEXT host_props = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
@@ -841,7 +923,7 @@ videoout_create_image_mem(const struct wsi_swapchain *wsi_chain, const struct ws
    const VkMemoryAllocateInfo allocate = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &import,
-      .allocationSize = VIDEOOUT_BUFFER_BYTES,
+      .allocationSize = buffer_bytes,
       .memoryTypeIndex = wsi_select_memory_type(wsi, 0, 0, type_bits),
    };
    return wsi->AllocateMemory(wsi_chain->device, &allocate, &wsi_chain->alloc, &image->memory);
@@ -871,26 +953,26 @@ videoout_swapchain_get_wsi_image(struct wsi_swapchain *wsi_chain, uint32_t image
    return &chain->images[image_index];
 }
 
-/* A buffer of the first count an application may render into, under lock:
- * neither held, nor waiting for its flip, nor flipped past the flip shown
- * last, nor on screen; the one flipped longest ago. UINT32_MAX when none is,
- * with *vblank set when only a flip still to show holds one. */
+/* A buffer of the count from first an application may render into, under
+ * lock: neither held, nor waiting for its flip, nor flipped past the flip
+ * shown last, nor on screen; the one flipped longest ago. UINT32_MAX when
+ * none is, with *vblank set when only a flip still to show holds one. */
 static uint32_t
-videoout_free_buffer_locked(uint32_t count, bool *vblank)
+videoout_free_buffer_locked(uint32_t first, uint32_t count, bool *vblank)
 {
    struct wsi_videoout_output *out = &videoout_output;
    const int64_t shown = videoout_shown_argument_locked();
 
-   /* On screen: the buffer of the latest flip shown. */
+   /* On screen: the buffer of the latest flip shown, in whichever set. */
    uint32_t on_screen = UINT32_MAX;
-   for (uint32_t i = 0; i < VIDEOOUT_BUFFERS; i++)
+   for (uint32_t i = 0; i < out->set_count * VIDEOOUT_BUFFERS; i++)
       if (out->buffer[i].argument != 0 && out->buffer[i].argument <= shown &&
           (on_screen == UINT32_MAX || out->buffer[i].argument > out->buffer[on_screen].argument))
          on_screen = i;
 
    uint32_t best = UINT32_MAX;
    *vblank = false;
-   for (uint32_t i = 0; i < count; i++) {
+   for (uint32_t i = first; i < first + count; i++) {
       if (out->buffer[i].held || out->buffer[i].pending || i == on_screen)
          continue;
       if (out->buffer[i].argument > shown) {
@@ -918,11 +1000,11 @@ videoout_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain, const VkA
          return VK_ERROR_OUT_OF_DATE_KHR;
       }
       bool vblank;
-      const uint32_t index = videoout_free_buffer_locked(chain->base.image_count, &vblank);
+      const uint32_t index = videoout_free_buffer_locked(chain->first, chain->base.image_count, &vblank);
       if (index != UINT32_MAX) {
          out->buffer[index].held = true;
          mtx_unlock(&out->lock);
-         *image_index = index;
+         *image_index = index - chain->first;
          return VK_SUCCESS;
       }
       if (info->timeout == 0) {
@@ -953,10 +1035,11 @@ videoout_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain, const VkA
 static VkResult
 videoout_swapchain_release_images(struct wsi_swapchain *wsi_chain, uint32_t count, const uint32_t *indices)
 {
+   const struct wsi_videoout_swapchain *chain = (const struct wsi_videoout_swapchain *)wsi_chain;
    struct wsi_videoout_output *out = &videoout_output;
    mtx_lock(&out->lock);
    for (uint32_t i = 0; i < count; i++)
-      out->buffer[indices[i]].held = false;
+      out->buffer[chain->first + indices[i]].held = false;
    cnd_broadcast(&out->changed);
    mtx_unlock(&out->lock);
    return VK_SUCCESS;
@@ -969,8 +1052,9 @@ videoout_swapchain_queue_present(struct wsi_swapchain *wsi_chain, uint32_t image
    struct wsi_videoout_swapchain *chain = (struct wsi_videoout_swapchain *)wsi_chain;
    struct wsi_videoout_output *out = &videoout_output;
 
+   const uint32_t buffer = chain->first + image_index;
    mtx_lock(&out->lock);
-   out->buffer[image_index].held = false;
+   out->buffer[buffer].held = false;
    if (chain->retired) {
       cnd_broadcast(&out->changed);
       mtx_unlock(&out->lock);
@@ -986,11 +1070,11 @@ videoout_swapchain_queue_present(struct wsi_swapchain *wsi_chain, uint32_t image
    assert(out->queue_count < ARRAY_SIZE(out->queue));
    out->queue[(out->queue_head + out->queue_count) % ARRAY_SIZE(out->queue)] = (struct wsi_videoout_present){
       .chain = chain,
-      .buffer = image_index,
+      .buffer = buffer,
       .fence = chain->base.fences[image_index],
    };
    out->queue_count++;
-   out->buffer[image_index].pending = true;
+   out->buffer[buffer].pending = true;
    chain->in_flight++;
    cnd_broadcast(&out->changed);
    mtx_unlock(&out->lock);
@@ -1015,7 +1099,7 @@ videoout_swapchain_destroy(struct wsi_swapchain *wsi_chain, const VkAllocationCa
       cnd_wait(&out->changed, &out->lock);
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       if (chain->images[i].acquired)
-         out->buffer[i].held = false;
+         out->buffer[chain->first + i].held = false;
    if (out->current == chain)
       out->current = NULL;
    cnd_broadcast(&out->changed);
@@ -1039,19 +1123,21 @@ videoout_surface_create_swapchain(VkIcdSurfaceBase *icd_surface, VkDevice device
    struct wsi_videoout_output *out = &videoout_output;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (pCreateInfo->imageExtent.width != VIDEOOUT_WIDTH || pCreateInfo->imageExtent.height != VIDEOOUT_HEIGHT ||
-       pCreateInfo->minImageCount > VIDEOOUT_BUFFERS || !wsi_device->GetMemoryHostPointerPropertiesEXT)
+   const struct wsi_videoout_mode *mode = videoout_mode_from_handle(surface->displayMode);
+   if (pCreateInfo->imageExtent.width != mode->size->extent.width ||
+       pCreateInfo->imageExtent.height != mode->size->extent.height || pCreateInfo->minImageCount > VIDEOOUT_BUFFERS ||
+       !wsi_device->GetMemoryHostPointerPropertiesEXT)
       return VK_ERROR_INITIALIZATION_FAILED;
 
    /* The output in the surface's mode: a mode other than the output's was not
     * offered. */
    videoout_settle_modes();
-   const struct wsi_videoout_mode *mode = videoout_mode_from_handle(surface->displayMode);
    if (mode->high_frame_rate && !out->high_mode_offered)
       return VK_ERROR_INITIALIZATION_FAILED;
 
+   const struct wsi_videoout_set *set = NULL;
    mtx_lock(&out->lock);
-   VkResult result = videoout_register_locked();
+   VkResult result = videoout_register_locked(mode->size, &set);
    if (result == VK_SUCCESS && out->current && out->current != (struct wsi_videoout_swapchain *)
                                                  wsi_swapchain_from_handle(pCreateInfo->oldSwapchain))
       result = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
@@ -1074,6 +1160,8 @@ videoout_surface_create_swapchain(VkIcdSurfaceBase *icd_surface, VkDevice device
       return result;
    }
 
+   chain->set = set;
+   chain->first = (uint32_t)(set - out->sets) * VIDEOOUT_BUFFERS;
    chain->base.destroy = videoout_swapchain_destroy;
    chain->base.get_wsi_image = videoout_swapchain_get_wsi_image;
    chain->base.acquire_next_image = videoout_swapchain_acquire_next_image;
