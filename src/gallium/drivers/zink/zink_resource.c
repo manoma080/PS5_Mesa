@@ -1051,6 +1051,17 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    if (templ->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) {
       if (!(vk_domain_from_heap(heap) & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
          heap = zink_heap_from_domain_flags(alloc_info->flags & ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, alloc_info->aflags);
+   } else if (templ->target == PIPE_BUFFER && (templ->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
+              !zink_heap_is_host_visible(screen, heap)) {
+      /* A persistent mapping must be of the memory itself. A mapping of memory the host cannot see is a staging copy
+       * (zink_buffer_map), written back only on an explicit flush or unmap, which a persistent mapping such as a
+       * descriptor buffer's never makes. Without a host-visible device-local type, the device-local visible heap is
+       * such memory.
+       */
+      enum zink_heap visible = zink_heap_from_domain_flags(alloc_info->flags & ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                                           alloc_info->aflags);
+      if (zink_mem_type_idx_from_types(screen, visible, reqs->memoryTypeBits) != UINT32_MAX)
+         heap = visible;
    }
 
    VkMemoryDedicatedAllocateInfo ded_alloc_info = {

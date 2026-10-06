@@ -1641,6 +1641,23 @@ zink_batch_descriptor_reset(struct zink_screen *screen, struct zink_batch_state 
    memset(bs->dd.pg, 0, sizeof(bs->dd.pg));
 }
 
+/* A descriptor buffer is mapped persistently for its whole life, so its memory has to be host-visible (allocate_bo). */
+static struct pipe_resource *
+create_db(struct zink_screen *screen, unsigned size)
+{
+   struct pipe_resource templ = {0};
+   templ.target = PIPE_BUFFER;
+   templ.format = PIPE_FORMAT_R8_UNORM;
+   templ.bind = ZINK_BIND_DESCRIPTOR;
+   templ.usage = PIPE_USAGE_DEFAULT;
+   templ.flags = PIPE_RESOURCE_FLAG_MAP_PERSISTENT;
+   templ.width0 = size;
+   templ.height0 = 1;
+   templ.depth0 = 1;
+   templ.array_size = 1;
+   return screen->base.resource_create(&screen->base, &templ);
+}
+
 /* called on batch state creation */
 bool
 zink_batch_descriptor_init(struct zink_screen *screen, struct zink_batch_state *bs)
@@ -1658,8 +1675,7 @@ zink_batch_descriptor_init(struct zink_screen *screen, struct zink_batch_state *
          }
       }
    } else if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-      unsigned bind = ZINK_BIND_DESCRIPTOR;
-      struct pipe_resource *pres = pipe_buffer_create(&screen->base, bind, 0, bs->ctx->dd.db.max_db_size * screen->base_descriptor_size);
+      struct pipe_resource *pres = create_db(screen, bs->ctx->dd.db.max_db_size * screen->base_descriptor_size);
       if (!pres)
          return false;
       bs->dd.db = zink_resource(pres);
@@ -1814,10 +1830,9 @@ zink_descriptors_init_bindless(struct zink_context *ctx)
    ctx->dd.bindless_init = true;
 
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-      unsigned bind = ZINK_BIND_DESCRIPTOR;
       VkDeviceSize size;
       VKSCR(GetDescriptorSetLayoutSizeEXT)(screen->dev, screen->bindless_layout, &size);
-      struct pipe_resource *pres = pipe_buffer_create(&screen->base, bind, 0, size);
+      struct pipe_resource *pres = create_db(screen, size);
       ctx->dd.db.bindless_db = zink_resource(pres);
       ctx->dd.db.bindless_db_map = pipe_buffer_map(&ctx->base, pres, PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_PERSISTENT, &ctx->dd.db.bindless_db_xfer);
       zink_batch_bind_db(ctx);

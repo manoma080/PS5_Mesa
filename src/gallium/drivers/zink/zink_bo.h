@@ -104,6 +104,17 @@ zink_mem_type_idx_from_types(struct zink_screen *screen, enum zink_heap heap, ui
    return UINT32_MAX;
 }
 
+/* Whether the memory types serving a heap are host-visible. On a device without a host-visible device-local type,
+ * ZINK_HEAP_DEVICE_LOCAL_VISIBLE is served by the device-local types (zink_internal_create_screen).
+ */
+static ALWAYS_INLINE bool
+zink_heap_is_host_visible(struct zink_screen *screen, enum zink_heap heap)
+{
+   return screen->heap_count[heap] &&
+          (screen->info.mem_props.memoryTypes[screen->heap_map[heap][0]].propertyFlags &
+           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+}
+
 bool
 zink_bo_init(struct zink_screen *screen);
 
