@@ -86,3 +86,10 @@ compiles on a PC.
 
 Mesa's licences apply. The files this fork adds are MIT, like the code around
 them.
+
+## Optional broker and Zink integration
+
+The opt-in broker overlay is owned here in [ps5/broker](ps5/broker/README.md),
+and built by PS5_Vulkan. Windows Zink now chooses IMMEDIATE only when
+advertised, otherwise FIFO. PS5_Vulkan also builds the PE64 WGL/Zink driver
+from a pinned revision of this fork; native EGL/OpenGL is a separate frontend.

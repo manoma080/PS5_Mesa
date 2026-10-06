@@ -34,8 +34,10 @@ static void
 zink_kopper_set_present_mode_for_interval(struct kopper_displaytarget *cdt, int interval)
 {
 #if DETECT_OS_WINDOWS
-    // not hooked up yet so let's not sabotage benchmarks
-    cdt->present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    /* Windows swap intervals are not wired up yet, but the requested mode
+     * must still be one supported by the surface. */
+    cdt->present_mode = cdt->present_modes & BITFIELD_BIT(VK_PRESENT_MODE_IMMEDIATE_KHR) ?
+                       VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
 #else
    assert(interval >= 0); /* TODO: VK_PRESENT_MODE_FIFO_RELAXED_KHR */
    if (interval == 0) {
